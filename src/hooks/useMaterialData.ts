@@ -1,0 +1,37 @@
+'use client';
+
+import { useLiveQuery } from 'dexie-react-hooks';
+import { useMemo } from 'react';
+import { db } from '@/lib/db';
+import { computeNodeStates, computeDepths, recommendNext } from '@/lib/progress';
+import type { IdeaNode } from '@/lib/types';
+
+/**
+ * Живые данные активного материала: узлы, рёбра, задачи, попытки,
+ * вычисленные состояния и рекомендация следующего узла.
+ */
+export function useMaterialData(materialId: string | null) {
+  const bundle = useLiveQuery(async () => {
+    if (!materialId) return null;
+    const [nodes, edges, tasks, attempts, regions, material] = await Promise.all([
+      db.nodes.where('materialId').equals(materialId).toArray(),
+      db.edges.where('materialId').equals(materialId).toArray(),
+      db.tasks.where('materialId').equals(materialId).toArray(),
+      db.attempts.where('materialId').equals(materialId).toArray(),
+      db.regions.where('materialId').equals(materialId).toArray(),
+      db.materials.get(materialId),
+    ]);
+    return { nodes, edges, tasks, attempts, regions: regions.sort((a, b) => a.orderIndex - b.orderIndex), material };
+  }, [materialId]);
+
+  return useMemo(() => {
+    if (!bundle) {
+      return { ready: false as const, nodes: [], regions: [], material: null, states: new Map(), depths: new Map(), nextNode: null, tasks: [], edges: [], attempts: [] };
+    }
+    const { nodes, edges, tasks, attempts, regions, material } = bundle;
+    const states = computeNodeStates({ nodes, edges, tasks, attempts });
+    const depths = computeDepths(nodes, edges);
+    const nextNode = recommendNext(nodes, states, depths);
+    return { ready: true as const, nodes, regions, material, states, depths, nextNode, tasks, edges, attempts };
+  }, [bundle]);
+}
