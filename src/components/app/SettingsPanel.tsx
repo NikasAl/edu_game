@@ -1,7 +1,7 @@
 'use client';
 
-import { useRef, useState } from 'react';
-import { Check, Download, Moon, Plug, Plus, Sun, Trash2, Upload } from 'lucide-react';
+import { useRef, useState, useSyncExternalStore } from 'react';
+import { Check, Copy, Download, Moon, Plug, Plus, ScrollText, Sun, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,7 +17,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { exportAll, importAll, resetMaterialProgress } from '@/lib/db';
-import { testProvider } from '@/lib/llm-client';
+import {
+  llmDebugClear,
+  llmDebugSnapshot,
+  llmDebugSubscribe,
+  testProvider,
+  type LLMLogEntry,
+} from '@/lib/llm-client';
 import { useAppStore, type Theme } from '@/store/useAppStore';
 import { PROVIDER_PRESETS, type ProviderType } from '@/lib/types';
 
@@ -96,6 +102,19 @@ export default function SettingsPanel() {
     if (res.ok) toast.success(res.message);
     else toast.error(res.message);
   };
+
+  const logEntries = useSyncExternalStore(llmDebugSubscribe, llmDebugSnapshot);
+  const copyLog = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(logEntries, null, 2));
+      toast.success('Журнал скопирован в буфер обмена');
+    } catch {
+      toast.error('Не удалось скопировать — скачай бэкап или скопируй вручную из полей ниже');
+    }
+  };
+  const fmtTime = (ts: number) =>
+    new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const fmtMsg = (m: LLMLogEntry['requestMessages'][number]) => `${m.role.toUpperCase()}:\n${m.content}`;
 
   return (
     <div className="flex flex-col gap-4">
@@ -252,6 +271,97 @@ export default function SettingsPanel() {
             >
               Сбросить прогресс активного материала
             </Button>
+          </CardContent>
+        </Card>
+      </section>
+      {/* Журнал LLM (отладка) */}
+      <section className="pb-2">
+        <div className="mb-2 flex items-center justify-between px-1">
+          <h2 className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
+            <ScrollText className="h-4 w-4" /> Журнал LLM
+            {logEntries.length > 0 && <Badge variant="secondary">{logEntries.length}</Badge>}
+          </h2>
+          <div className="flex gap-1">
+            <Button size="sm" variant="outline" onClick={copyLog} disabled={logEntries.length === 0}>
+              <Copy className="mr-1 h-3.5 w-3.5" /> Копировать всё
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={llmDebugClear}
+              disabled={logEntries.length === 0}
+              aria-label="Очистить журнал"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+        <Card>
+          <CardContent className="flex flex-col gap-2 p-4">
+            {logEntries.length === 0 ? (
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Пока пусто. Каждое обращение к LLM попадает сюда: промпт, сырой ответ, статус и время. Если видишь
+                ошибку вроде «LLM вернул некорректный JSON» — открой последнюю запись и посмотри, что реально вернула
+                модель.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {[...logEntries]
+                  .reverse()
+                  .slice(0, 20)
+                  .map((e) => (
+                    <details key={e.id} className="rounded-md border border-border/60">
+                      <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs">
+                        <Badge variant={e.ok ? 'default' : 'destructive'} className="shrink-0">
+                          {e.ok ? 'OK' : 'ошибка'}
+                        </Badge>
+                        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{fmtTime(e.ts)}</span>
+                        <span className="shrink-0 font-medium">{e.op}</span>
+                        <span className="truncate text-muted-foreground">
+                          HTTP {e.status ?? '—'} · {e.durationMs} мс · попыток {e.attempts}
+                        </span>
+                      </summary>
+                      <div className="flex flex-col gap-2 border-t border-border/60 px-2.5 py-2">
+                        <p className="text-[11px] text-muted-foreground">
+                          модель: <span className="font-mono">{e.model}</span>
+                          {e.finishReason && (
+                            <>
+                              {' '}
+                              · finish_reason: <span className="font-mono">{e.finishReason}</span>
+                            </>
+                          )}
+                          {e.usage && (
+                            <>
+                              {' '}
+                              · токены: <span className="font-mono">{e.usage.total_tokens}</span> (вопрос{' '}
+                              <span className="font-mono">{e.usage.prompt_tokens}</span> / ответ{' '}
+                              <span className="font-mono">{e.usage.completion_tokens}</span>)
+                            </>
+                          )}
+                        </p>
+                        {e.error && (
+                          <p className="rounded bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">{e.error}</p>
+                        )}
+                        <div>
+                          <p className="mb-1 text-[11px] font-medium text-muted-foreground">Запрос (промпт)</p>
+                          <pre className="max-h-40 overflow-y-auto thin-scroll whitespace-pre-wrap break-words rounded bg-muted/50 p-2 text-[11px] leading-relaxed">
+                            {e.requestMessages.map(fmtMsg).join('\n\n')}
+                          </pre>
+                        </div>
+                        <div>
+                          <p className="mb-1 text-[11px] font-medium text-muted-foreground">Ответ (сырой)</p>
+                          <pre className="max-h-40 overflow-y-auto thin-scroll whitespace-pre-wrap break-words rounded bg-muted/50 p-2 text-[11px] leading-relaxed">
+                            {e.rawResponse || '(пусто)'}
+                          </pre>
+                        </div>
+                      </div>
+                    </details>
+                  ))}
+                {logEntries.length > 20 && (
+                  <p className="text-[11px] text-muted-foreground">Показаны последние 20 из {logEntries.length}.</p>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       </section>

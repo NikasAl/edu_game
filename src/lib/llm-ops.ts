@@ -4,7 +4,8 @@
  *  - LLM (OpenAI-совместимый провайдер из настроек);
  *  - локальный демо-оценщик (без LLM; помечается в UI как «демо»).
  */
-import { callLLM, extractJson, type LLMMessage } from './llm-client';
+import { callLLM, type LLMMessage } from './llm-client';
+import { extractJson } from './llm-json';
 import type {
   FeynmanGrade,
   IngestResult,
@@ -58,7 +59,7 @@ export async function ingestSplitIntoIdeas(
       content: `${INGEST_PROMPT}\n\nНазвание материала: «${materialTitle}»\n\nМАТЕРИАЛ:\n${sourceText.slice(0, 24000)}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 8000 });
+  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 20000, op: 'ingest' });
   const parsed = extractJson<IngestResult>(res.content);
   if (!Array.isArray(parsed.atoms) || parsed.atoms.length === 0) {
     throw new Error('LLM не вернул ни одного атома');
@@ -131,7 +132,7 @@ export async function genTasksForAtom(
       }`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 2500 });
+  const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 8000, op: 'gen_tasks' });
   const parsed = extractJson<GeneratedTasks>(res.content);
   if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
     throw new Error('LLM не вернул задачи');
@@ -166,7 +167,7 @@ export async function gradeFeynmanLLM(
       content: `${FEYNMAN_PROMPT}\n\nИдея: «${node.title}»\nЭталонная формулировка: ${node.formulation}\nКлючевые термины: ${node.keyTerms.join(', ')}\nПример: ${node.example}\n\nОБЪЯСНЕНИЕ СТУДЕНТА:\n${userAnswer}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 1000 });
+  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 4000, op: 'grade_feynman' });
   const parsed = extractJson<FeynmanGrade>(res.content);
   const accuracy = clampInt(parsed.accuracy, 0, 2);
   const completeness = clampInt(parsed.completeness, 0, 2);
@@ -263,7 +264,7 @@ export async function validateOwnTaskLLM(
       content: `${OWN_TASK_PROMPT}\n\nИдея: «${node.title}»\nФормулировка идеи: ${node.formulation}\n\nЗАДАЧА СТУДЕНТА:\n${userTask}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 800 });
+  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 4000, op: 'own_task' });
   const parsed = extractJson<OwnTaskVerdict>(res.content);
   const onTopic = Boolean(parsed.onTopic);
   const solvable = Boolean(parsed.solvable);
@@ -307,7 +308,7 @@ export async function genHint(
       content: `Дай подсказку уровня ${level} (1 = лёгкий намёк-направление, 2 = конкретный шаг без готового ответа) к задаче. Одно-два предложения, по-русски.\n\nИдея: «${node.title}» — ${node.formulation}\nЗадача: ${task.prompt}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 300 });
+  const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 2000, op: 'hint' });
   return res.content.trim();
 }
 
