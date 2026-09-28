@@ -14,6 +14,8 @@ interface AppState {
   closeNode: () => void;
   activeMaterialId: string | null;
   setActiveMaterialId: (id: string) => Promise<void>;
+  /** Сбросить активную карту (когда её удалили, а других нет) */
+  unsetActiveMaterial: () => Promise<void>;
   hydrated: boolean;
 
   // Тема
@@ -52,6 +54,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveMaterialId: async (id) => {
     await setMeta('activeMaterialId', id);
     set({ activeMaterialId: id });
+  },
+
+  unsetActiveMaterial: async () => {
+    await setMeta('activeMaterialId', '');
+    set({ activeMaterialId: null });
   },
 
   theme: 'dark',
@@ -107,7 +114,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   init: async () => {
     const { seedDemoIfFirstRun } = await import('@/lib/db');
     await seedDemoIfFirstRun();
-    const materialId = (await getMeta('activeMaterialId')) ?? null;
+    let materialId = (await getMeta('activeMaterialId')) ?? null;
+    // активная карта могла быть удалена — проверяем и выбираем запасную
+    if (materialId && !(await db.materials.get(materialId))) materialId = null;
+    if (!materialId) {
+      const all = await db.materials.toArray();
+      const first = all.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0];
+      if (first) {
+        materialId = first.id;
+        await setMeta('activeMaterialId', materialId);
+      }
+    }
     set({ activeMaterialId: materialId, hydrated: true });
     await get().loadProviders();
     const savedTheme = (typeof localStorage !== 'undefined' ? localStorage.getItem('edu-theme') : null) as Theme | null;

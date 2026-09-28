@@ -2,20 +2,22 @@
 
 import { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowRight, FileText, Loader2, Save, Sparkles, TriangleAlert } from 'lucide-react';
+import { ArrowRight, FileText, Loader2, Map as MapIcon, Save, Sparkles, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { db } from '@/lib/db';
 import { useAppStore } from '@/store/useAppStore';
 import { ingestSplitIntoIdeas, genTasksForAtom, generatedToTask, validateIngest } from '@/lib/llm-ops';
 import { hasCycle } from '@/lib/progress';
 import { normalizeText } from '@/lib/safeMath';
-import type { EdgeKind, IdeaEdge, IdeaNode, Region, Task } from '@/lib/types';
+import { getPathToRoot, nextOrderIndex } from '@/lib/maps';
+import type { EdgeKind, IdeaEdge, IdeaNode, Material, Region, Task } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 
 type Phase = 'input' | 'parsing' | 'review' | 'tasks';
@@ -23,6 +25,7 @@ type Phase = 'input' | 'parsing' | 'review' | 'tasks';
 export default function ImportPanel() {
   const providers = useAppStore((s) => s.providers);
   const activeProvider = providers.find((p) => p.isActive) ?? null;
+  const activeMaterialId = useAppStore((s) => s.activeMaterialId);
   const ingestResult = useAppStore((s) => s.ingestResult);
   const ingestTitle = useAppStore((s) => s.ingestTitle);
   const ingestSourceText = useAppStore((s) => s.ingestSourceText);
@@ -35,8 +38,10 @@ export default function ImportPanel() {
   const [progressMsg, setProgressMsg] = useState('');
   const [progressVal, setProgressVal] = useState(0);
 
-  const materialsCount = useLiveQuery(() => db.materials.count(), []);
-  void materialsCount;
+  const materials = useLiveQuery(() => db.materials.toArray(), []);
+  // куда поместить новую карту: 'root' или id существующей карты
+  const [parentChoice, setParentChoice] = useState<string | null>(null);
+  const effectiveParent = parentChoice ?? (activeMaterialId && materials?.some((m) => m.id === activeMaterialId) ? activeMaterialId : 'root');
 
   const startParse = async () => {
     if (!activeProvider) {
@@ -116,7 +121,14 @@ export default function ImportPanel() {
         }
       });
 
-      await db.materials.put({ id: materialId, title: ingestTitle.trim(), sourceText: ingestSourceText.trim(), createdAt: now });
+      await db.materials.put({
+        id: materialId,
+        title: ingestTitle.trim(),
+        sourceText: ingestSourceText.trim(),
+        createdAt: now,
+        parentId: effectiveParent === 'root' ? null : effectiveParent,
+        orderIndex: nextOrderIndex(materials ?? [], effectiveParent === 'root' ? null : effectiveParent),
+      });
       await db.regions.bulkPut(regions);
       await db.nodes.bulkPut(nodes);
       await db.edges.bulkPut(edges);
@@ -148,7 +160,11 @@ export default function ImportPanel() {
       setIngestResult(null);
       setIngestDraft('', '');
       setPhase('input');
-      toast.success('Материал сохранён! Карта знаний готова.');
+      toast.success(
+        effectiveParent === 'root'
+          ? 'Карта сохранена в корне дерева карт!'
+          : 'Карта сохранена как подраздел!'
+      );
       setActiveTab('map');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Ошибка сохранения');
@@ -186,6 +202,36 @@ export default function ImportPanel() {
                 placeholder="Например: Лекции по кинематике"
                 disabled={phase !== 'input'}
               />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                Куда поместить новую карту
+              </label>
+              <Select value={effectiveParent} onValueChange={setParentChoice} disabled={phase !== 'input'}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Выбери место" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="root">
+                    <span className="flex items-center gap-2">
+                      <MapIcon className="h-3.5 w-3.5" /> Новая карта в корне
+                    </span>
+                  </SelectItem>
+                  {(materials ?? []).map((m: Material) => {
+                    const depth = getPathToRoot(materials ?? [], m.id).length - 1;
+                    return (
+                      <SelectItem key={m.id} value={m.id}>
+                        <span className="flex items-center gap-2 truncate">
+                          {'— '.repeat(depth)}
+                          <MapIcon className="h-3.5 w-3.5 shrink-0 text-violet-300" />
+                          {m.title}
+                          {m.id === activeMaterialId ? ' (текущая)' : ''}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
             </div>
             <div>
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
@@ -239,8 +285,8 @@ export default function ImportPanel() {
           </p>
           При первом запуске в систему добавлен демо-курс «Алгебра и начала анализа: Производная» — 12 атомов идей,
           гибридный граф зависимостей и 24 параметрические задачи с автопроверкой. Его можно пройти целиком без LLM:
-          локальный демо-оценщик проверит фейнмановские объяснения. Импорт нового материала добавится к карте и станет
-          активным.
+          локальный демо-оценщик проверит фейнмановские объяснения. Импортированный материал станет отдельной картой
+          (можно вложить в существующую) — все карты доступны через кнопку «Карты».
         </CardContent>
       </Card>
     </div>

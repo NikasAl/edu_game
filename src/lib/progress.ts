@@ -161,6 +161,9 @@ export function recommendNext(
   return pool[0];
 }
 
+export const LAYER_H = 210; // вертикальный шаг между слоями
+export const COL_W = 225; // горизонтальный шаг внутри слоя
+
 /**
  * Сгенерировать позиции узлов для карты: вертикальные слои по глубине
  * (сверху вниз, как карта пути в Slay the Spire), внутри слоя — по горизонтали.
@@ -181,8 +184,6 @@ export function layoutGraph(
     byLayer.set(d, list);
   }
   const positions = new Map<string, { x: number; y: number }>();
-  const LAYER_H = 210; // вертикальный шаг между слоями
-  const COL_W = 225; // горизонтальный шаг внутри слоя
   for (const [d, list] of byLayer) {
     // сортировка внутри слоя: регион, затем orderIndex
     list.sort(

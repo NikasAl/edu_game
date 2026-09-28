@@ -4,26 +4,51 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
-import { ArrowRight, BookOpen, Sparkles, TriangleAlert, Trophy } from 'lucide-react';
+import {
+  ArrowRight,
+  BookOpen,
+  ChevronRight,
+  FolderTree,
+  Map as MapIcon,
+  Sparkles,
+  TriangleAlert,
+  Trophy,
+} from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
+import { useMapStats } from '@/hooks/useMapStats';
+import { childrenOf, getPathToRoot } from '@/lib/maps';
+import MapsManager from '@/components/app/MapsManager';
 import MathText from '@/components/MathText';
 import { getMeta, setMeta } from '@/lib/db';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { IdeaNode } from '@/lib/types';
 
 export default function HomePanel() {
   const activeMaterialId = useAppStore((s) => s.activeMaterialId);
-  const openNode = useAppStore((s) => s.openNode);
+  const setActiveMaterialId = useAppStore((s) => s.setActiveMaterialId);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const openNode = useAppStore((s) => s.openNode);
   const data = useMaterialData(activeMaterialId);
+  const { ready: statsReady, materials, stats } = useMapStats();
   const [lastNodeId, setLastNodeId] = useState<string | null>(null);
+  const [managerOpen, setManagerOpen] = useState(false);
 
   useEffect(() => {
     void getMeta('lastNodeId').then(setLastNodeId);
   }, [data.ready]);
 
-  if (!data.ready) {
+  const path = useMemo(
+    () => (statsReady ? getPathToRoot(materials, activeMaterialId) : []),
+    [statsReady, materials, activeMaterialId]
+  );
+  const ancestors = path.slice(0, -1);
+  const childMaps = useMemo(
+    () => (statsReady && activeMaterialId ? childrenOf(materials, activeMaterialId) : []),
+    [statsReady, materials, activeMaterialId]
+  );
+
+  if (!data.ready || !statsReady) {
     return <p className="pt-8 text-center text-sm text-muted-foreground">Загрузка…</p>;
   }
 
@@ -40,16 +65,36 @@ export default function HomePanel() {
   return (
     <div className="flex flex-col gap-4">
       {/* Шапка материала */}
-      <header className="flex items-start gap-3">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/15">
-          <BookOpen className="h-5 w-5 text-primary" />
+      <header className="flex flex-col gap-1">
+        <div className="flex items-start gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/15">
+            <BookOpen className="h-5 w-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h1 className="text-lg font-semibold leading-tight">{material?.title ?? 'Нет материала'}</h1>
+            <p className="text-xs text-muted-foreground">
+              {mastered} из {total} идей освоено · {percent}%
+            </p>
+          </div>
+          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setManagerOpen(true)}>
+            <FolderTree className="mr-1 h-4 w-4" /> Карты
+          </Button>
         </div>
-        <div className="min-w-0">
-          <h1 className="text-lg font-semibold leading-tight">{material?.title ?? 'Нет материала'}</h1>
-          <p className="text-xs text-muted-foreground">
-            {mastered} из {total} идей освоено · {percent}%
-          </p>
-        </div>
+        {ancestors.length > 0 && (
+          <nav className="flex flex-wrap items-center gap-0.5 text-xs text-muted-foreground" aria-label="Путь по картам">
+            {ancestors.map((m) => (
+              <span key={m.id} className="flex items-center gap-0.5">
+                <button
+                  onClick={() => void setActiveMaterialId(m.id)}
+                  className="max-w-[160px] truncate hover:text-primary hover:underline"
+                >
+                  {m.title}
+                </button>
+                <ChevronRight className="h-3 w-3 shrink-0" />
+              </span>
+            ))}
+          </nav>
+        )}
       </header>
 
       {/* Общий прогресс */}
@@ -114,6 +159,44 @@ export default function HomePanel() {
         </Card>
       )}
 
+      {/* Подкарты: входы в дочерние карты */}
+      {childMaps.length > 0 && (
+        <section aria-label="Подкарты">
+          <h2 className="mb-2 px-1 text-sm font-medium text-muted-foreground">Карты внутри</h2>
+          <div className="flex flex-col gap-2">
+            {childMaps.map((c) => {
+              const st = stats.get(c.id);
+              const pctC =
+                st && st.subtreeAtoms > 0 ? Math.round((st.subtreeMastered / st.subtreeAtoms) * 100) : 0;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => {
+                    setActiveTab('map');
+                    void setActiveMaterialId(c.id);
+                  }}
+                  className="flex items-center gap-3 rounded-xl border border-violet-500/30 bg-violet-500/5 p-3 text-left transition-colors hover:border-violet-500/60"
+                >
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-500/15">
+                    <MapIcon className="h-4 w-4 text-violet-300" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{c.title}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {st ? `${st.subtreeMastered}/${st.subtreeAtoms} идей` : '—'}
+                      {st && st.subtreeMaps > 0 ? ` · ${st.subtreeMaps} вложенных карт` : ''}
+                    </p>
+                  </div>
+                  <Badge variant={pctC === 100 && st?.subtreeAtoms ? 'default' : 'secondary'} className="shrink-0">
+                    {pctC}%
+                  </Badge>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* Регионы: сводка */}
       <section aria-label="Регионы карты">
         <h2 className="mb-2 px-1 text-sm font-medium text-muted-foreground">Регионы карты</h2>
@@ -142,6 +225,8 @@ export default function HomePanel() {
           })}
         </div>
       </section>
+
+      <MapsManager open={managerOpen} onOpenChange={setManagerOpen} />
     </div>
   );
 }

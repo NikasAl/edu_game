@@ -36,6 +36,18 @@ export class EduGameDexie extends Dexie {
       progress: 'nodeId, materialId, status',
       meta: 'key',
     });
+    // v2: карты образуют дерево (parentId + orderIndex).
+    // Существующие материалы становятся корневыми картами.
+    this.version(2)
+      .stores({
+        materials: 'id, createdAt, parentId, orderIndex',
+      })
+      .upgrade(async (tx) => {
+        await tx.table('materials').toCollection().modify((m: { parentId?: string | null; orderIndex?: number }) => {
+          if (m.parentId === undefined) m.parentId = null;
+          if (m.orderIndex === undefined) m.orderIndex = 0;
+        });
+      });
   }
 }
 
@@ -90,7 +102,7 @@ export async function seedDemoIfFirstRun(): Promise<boolean> {
 export async function exportAll(): Promise<string> {
   const payload = {
     app: 'edu_game',
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     materials: await db.materials.toArray(),
     regions: await db.regions.toArray(),
@@ -111,7 +123,15 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
       return { ok: false, message: 'Неверный формат файла: ожидается бэкап edu_game' };
     }
     await db.transaction('rw', [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress, db.providers], async () => {
-        if (data.materials) await db.materials.bulkPut(data.materials);
+        // нормализация под дерево карт (бэкапы версии 1 не содержат parentId)
+        if (data.materials)
+          await db.materials.bulkPut(
+            (data.materials as Material[]).map((m) => ({
+              ...m,
+              parentId: m.parentId ?? null,
+              orderIndex: m.orderIndex ?? 0,
+            }))
+          );
         if (data.regions) await db.regions.bulkPut(data.regions);
         if (data.nodes) await db.nodes.bulkPut(data.nodes);
         if (data.edges) await db.edges.bulkPut(data.edges);
@@ -133,4 +153,52 @@ export async function resetMaterialProgress(materialId: string): Promise<void> {
     await db.attempts.where('materialId').equals(materialId).delete();
     await db.progress.where('materialId').equals(materialId).delete();
   });
+}
+
+/**
+ * Удалить карту вместе со всеми вложенными картами и их содержимым
+ * (регионы, атомы, рёбра, задачи, попытки, прогресс).
+ * Возвращает количество удалённых карт.
+ */
+export async function deleteMapCascade(rootId: string): Promise<number> {
+  const all = await db.materials.toArray();
+  const ids = collectSubtreeIds(all, rootId);
+  await db.transaction(
+    'rw',
+    [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress],
+    async () => {
+      await db.materials.bulkDelete(ids);
+      for (const mid of ids) {
+        await db.regions.where('materialId').equals(mid).delete();
+        await db.nodes.where('materialId').equals(mid).delete();
+        await db.edges.where('materialId').equals(mid).delete();
+        await db.tasks.where('materialId').equals(mid).delete();
+        await db.attempts.where('materialId').equals(mid).delete();
+        await db.progress.where('materialId').equals(mid).delete();
+      }
+    }
+  );
+  return ids.length;
+}
+
+/** id карты + id всех её потомков (защита от циклов включена) */
+export function collectSubtreeIds(materials: Material[], rootId: string): string[] {
+  const byParent = new Map<string | null, Material[]>();
+  for (const m of materials) {
+    const p = m.parentId ?? null;
+    const list = byParent.get(p) ?? [];
+    list.push(m);
+    byParent.set(p, list);
+  }
+  const out: string[] = [];
+  const stack = [rootId];
+  const seen = new Set<string>();
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    for (const c of byParent.get(id) ?? []) stack.push(c.id);
+  }
+  return out;
 }
