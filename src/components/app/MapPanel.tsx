@@ -5,6 +5,8 @@ import {
   Background,
   BackgroundVariant,
   Controls,
+  Handle,
+  Position,
   ReactFlow,
   type Edge as RFEdge,
   type Node as RFNode,
@@ -37,6 +39,13 @@ function GameMapNode({ data }: { data: GameNodeData }) {
         data.isNext ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
       }`}
     >
+      {/* якоря рёбер: невидимы, но без них React Flow не отрисовывает связи */}
+      <Handle
+        type="target"
+        position={Position.Top}
+        className="!h-1.5 !w-1.5 !border-0 !bg-transparent !opacity-0"
+        isConnectable={false}
+      />
       <div className="flex items-center gap-1.5">
         <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: data.regionColor }} />
         <span className={`text-[10px] font-medium uppercase tracking-wide ${meta.color}`}>{meta.label}</span>
@@ -54,6 +63,12 @@ function GameMapNode({ data }: { data: GameNodeData }) {
           />
         ))}
       </div>
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="!h-1.5 !w-1.5 !border-0 !bg-transparent !opacity-0"
+        isConnectable={false}
+      />
     </div>
   );
 }

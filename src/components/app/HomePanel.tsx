@@ -7,6 +7,7 @@ import { Progress } from '@/components/ui/progress';
 import { ArrowRight, BookOpen, Sparkles, TriangleAlert, Trophy } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
+import MathText from '@/components/MathText';
 import { getMeta, setMeta } from '@/lib/db';
 import { useEffect, useState } from 'react';
 import type { IdeaNode } from '@/lib/types';
@@ -149,7 +150,9 @@ function ResumeCard({ node, risky }: { node: IdeaNode; risky: boolean }) {
   return (
     <div>
       <p className="font-medium leading-snug">{node.title}</p>
-      <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{node.formulation}</p>
+      <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
+        <MathText>{node.formulation}</MathText>
+      </p>
       {risky && (
         <p className="mt-2 flex items-center gap-1.5 text-xs text-amber-400">
           <TriangleAlert className="h-3.5 w-3.5" />

@@ -16,7 +16,9 @@ import type {
 } from './types';
 import { normalizeText } from './safeMath';
 
-const SYSTEM = `Ты — методист-редактор образовательных материалов. Ты аккуратен, соблюдаешь запрошенный формат JSON и пишешь по-русски. Не выдумывай факты, которых нет в материале; если чего-то не хватает — опирайся на общепринятые школьные/вузовские формулировки.`;
+const SYSTEM = `Ты — методист-редактор образовательных материалов. Ты аккуратен, соблюдаешь запрошенный формат JSON и пишешь по-русски. Не выдумывай факты, которых нет в материале; если чего-то не хватает — опирайся на общепринятые школьные/вузовские формулировки.
+
+ФОРМУЛЫ: пиши математические выражения в LaTeX — строчные формулы оборачивай в \( ... \) (например: \( v(t) = 2at \)), выключные/отдельной строкой — в \[ ... \]. Степени и индексы — только LaTeX-синтаксисом (\( x^2 \), \( t_0 \)), без юникод-надстрочных знаков (², ₀) ВНУТРИ формул. Вне формул — обычный текст. В поля, которые обрабатывает решатель (expr, value, alts), LaTeX НЕ писать — там чистый синтаксис решателя.`;
 
 // ============ 1. Ингест: текст → атомы идей ============
 
@@ -59,7 +61,7 @@ export async function ingestSplitIntoIdeas(
       content: `${INGEST_PROMPT}\n\nНазвание материала: «${materialTitle}»\n\nМАТЕРИАЛ:\n${sourceText.slice(0, 24000)}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 20000, op: 'ingest' });
+  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 50000, op: 'ingest' });
   const parsed = extractJson<IngestResult>(res.content);
   if (!Array.isArray(parsed.atoms) || parsed.atoms.length === 0) {
     throw new Error('LLM не вернул ни одного атома');
@@ -72,10 +74,11 @@ export async function ingestSplitIntoIdeas(
 const TASKS_PROMPT = `Создай для атома знания 2 проверяемых задания.
 
 Требования:
-- задача 1: числовая, ПАРАМЕТРИЧЕСКАЯ — придумай 2–4 параметра с 3–4 допустимыми значениями каждый; ответ должен выражаться формулой от параметров (expr: только числа, параметры, + - * / ^, скобки, sqrt/abs/min/max/round);
+- задача 1: числовая, ПАРАМЕТРИЧЕСКАЯ — придумай 2–4 параметра с 3–4 допустимыми значениями каждый; ответ должен выражаться формулой от параметров; ВАЖНО: поле expr — чистый синтаксис решателя (только числа, параметры, + - * / ^, скобки, sqrt/abs/min/max/round), НЕ LaTeX;
+- текст задачи (prompt) может содержать LaTeX \( \) для формул и подстановки вида {{имя_параметра}};
 - задача 2: с выбором варианта (3 опции) ИЛИ точным коротким текстовым ответом;
 - answers должны быть вычислимы/однозначны; числовой ответ — целое или с <=2 знаками после запятой;
-- hints: 2 подсказки (1-я — направление, 2-я — шаг решения), explanation — полный разбор;
+- hints: 2 подсказки (1-я — направление, 2-я — шаг решения), explanation — полный разбор (можно с LaTeX);
 - всё по-русски, в рамках идеи атома.
 
 Верни СТРОГО JSON:
@@ -132,7 +135,7 @@ export async function genTasksForAtom(
       }`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 8000, op: 'gen_tasks' });
+  const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 50000, op: 'gen_tasks' });
   const parsed = extractJson<GeneratedTasks>(res.content);
   if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
     throw new Error('LLM не вернул задачи');
@@ -341,7 +344,7 @@ export function generatedToTask(
   gen: GeneratedTasks['tasks'][number],
   ids: { id: string; nodeId: string; materialId: string; orderIndex: number }
 ): Task {
-  const base: Task = {
+  const base: Omit<Task, 'answerSpec'> = {
     id: ids.id,
     nodeId: ids.nodeId,
     materialId: ids.materialId,

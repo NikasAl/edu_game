@@ -10,8 +10,8 @@ type Token =
   | { t: 'num'; v: number }
   | { t: 'id'; v: string }
   | { t: 'op'; v: string }
-  | { t: 'lp' }
-  | { t: 'rp' };
+  | { t: 'lp'; v: '(' }
+  | { t: 'rp'; v: ')' };
 
 function tokenize(input: string): Token[] {
   const tokens: Token[] = [];
@@ -45,12 +45,12 @@ function tokenize(input: string): Token[] {
       continue;
     }
     if (c === '(') {
-      tokens.push({ t: 'lp' });
+      tokens.push({ t: 'lp', v: '(' });
       i++;
       continue;
     }
     if (c === ')') {
-      tokens.push({ t: 'rp' });
+      tokens.push({ t: 'rp', v: ')' });
       i++;
       continue;
     }

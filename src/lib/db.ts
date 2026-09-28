@@ -110,17 +110,7 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
     if (data?.app !== 'edu_game' || !Array.isArray(data.nodes)) {
       return { ok: false, message: 'Неверный формат файла: ожидается бэкап edu_game' };
     }
-    await db.transaction(
-      'rw',
-      db.materials,
-      db.regions,
-      db.nodes,
-      db.edges,
-      db.tasks,
-      db.attempts,
-      db.progress,
-      db.providers,
-      async () => {
+    await db.transaction('rw', [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress, db.providers], async () => {
         if (data.materials) await db.materials.bulkPut(data.materials);
         if (data.regions) await db.regions.bulkPut(data.regions);
         if (data.nodes) await db.nodes.bulkPut(data.nodes);
@@ -129,8 +119,7 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
         if (data.attempts) await db.attempts.bulkPut(data.attempts);
         if (data.progress) await db.progress.bulkPut(data.progress);
         if (data.providers) await db.providers.bulkPut(data.providers);
-      }
-    );
+    });
     const counts = `узлов: ${data.nodes.length}, задач: ${data.tasks?.length ?? 0}, попыток: ${data.attempts?.length ?? 0}`;
     return { ok: true, message: `Импортировано (${counts})` };
   } catch (e) {

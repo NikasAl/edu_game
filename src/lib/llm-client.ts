@@ -264,7 +264,7 @@ export async function callLLM(
 
     // --- reasoning-модели съедают лимит токенов размышлениями: повторяем с удвоенным ---
     // (finish_reason=length + пустой content = на ответ не хватило токенов)
-    if (!content.trim() && finishReason === 'length' && maxTokens !== undefined && maxTokens * 2 <= 32000) {
+    if (!content.trim() && finishReason === 'length' && maxTokens !== undefined && maxTokens * 2 <= 100000) {
       attempts++;
       maxTokens = maxTokens * 2;
       const res2 = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: true });

@@ -47,6 +47,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeMaterialId: null,
   hydrated: false,
 
+  // BUGFIX: метод был объявлен в интерфейсе, но не реализован — вызов в конце
+  // saveMaterial (ImportPanel) падал с «…is not a function» ПОСЛЕ генерации задач
+  setActiveMaterialId: async (id) => {
+    await setMeta('activeMaterialId', id);
+    set({ activeMaterialId: id });
+  },
+
   theme: 'dark',
   setTheme: (t) => {
     set({ theme: t });

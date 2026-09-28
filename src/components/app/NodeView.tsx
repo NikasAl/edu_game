@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
+import MathText from '@/components/MathText';
 import { db, setMeta } from '@/lib/db';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
@@ -154,7 +155,7 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
 }
 
 function titleList(data: ReturnType<typeof useMaterialData>, ids: string[]): string {
-  const byId = new Map(data.nodes.map((n) => [n.id, n.title]));
+  const byId = new Map<string, string>(data.nodes.map((n) => [n.id, n.title] as const));
   return ids.map((id) => byId.get(id) ?? '—').join(', ');
 }
 
@@ -180,16 +181,22 @@ function IdeaCard({ node }: { node: IdeaNode }) {
       <CardContent className="flex flex-col gap-3 p-4">
         <div>
           <p className="text-[11px] font-medium uppercase tracking-wide text-primary">Идея</p>
-          <p className="mt-1 text-[15px] font-medium leading-snug">{node.formulation}</p>
+          <p className="mt-1 text-[15px] font-medium leading-snug">
+            <MathText>{node.formulation}</MathText>
+          </p>
         </div>
         <div className="rounded-lg bg-muted/50 p-3">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Пример</p>
-          <p className="mt-1 text-sm leading-snug">{node.example}</p>
+          <p className="mt-1 text-sm leading-snug">
+            <MathText>{node.example}</MathText>
+          </p>
         </div>
         {node.misconception && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
             <p className="text-[11px] font-medium uppercase tracking-wide text-amber-400">Частая ошибка</p>
-            <p className="mt-1 text-sm leading-snug text-amber-200/90">{node.misconception}</p>
+            <p className="mt-1 text-sm leading-snug text-amber-200/90">
+              <MathText>{node.misconception}</MathText>
+            </p>
           </div>
         )}
         {node.sourceRef && (
@@ -203,7 +210,9 @@ function IdeaCard({ node }: { node: IdeaNode }) {
               <DialogHeader>
                 <DialogTitle>Источник</DialogTitle>
               </DialogHeader>
-              <p className="text-sm leading-relaxed text-muted-foreground">{node.sourceRef}</p>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                <MathText>{node.sourceRef}</MathText>
+              </p>
             </DialogContent>
           </Dialog>
         )}
@@ -271,7 +280,9 @@ function FeynmanTrial({
           done={passed}
           mode={provider ? `LLM: ${provider.model}` : 'локальный оценщик (демо)'}
         />
-        <p className="text-sm leading-snug text-muted-foreground">{node.feynmanQuestion}</p>
+        <p className="text-sm leading-snug text-muted-foreground">
+          <MathText>{node.feynmanQuestion}</MathText>
+        </p>
         <Textarea
           placeholder="Представь, что объясняешь другу. Суть своими словами + пример…"
           value={text}
@@ -315,10 +326,18 @@ function GradeResult({ grade }: { grade: FeynmanGrade }) {
       </div>
       {grade.misconceptions.length > 0 && (
         <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-rose-300">
-          {grade.misconceptions.map((m, i) => <li key={i}>{m}</li>)}
+          {grade.misconceptions.map((m, i) => (
+            <li key={i}>
+              <MathText>{m}</MathText>
+            </li>
+          ))}
         </ul>
       )}
-      {grade.feedback && <p className="mt-2 text-sm leading-snug text-muted-foreground">{grade.feedback}</p>}
+      {grade.feedback && (
+        <p className="mt-2 text-sm leading-snug text-muted-foreground">
+          <MathText>{grade.feedback}</MathText>
+        </p>
+      )}
     </div>
   );
 }
@@ -344,8 +363,17 @@ function TaskTrial({
   const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(attempt?.verdict === 'pass' ? 'pass' : null);
   const [correctShown, setCorrectShown] = useState<string | null>(null);
   const [hintLevel, setHintLevel] = useState(0);
-  const hints = useMemo(() => [task.hints[0] ?? '', task.hints[1] ?? '', task.explanation].filter(Boolean), [task]);
+  const [llmHints, setLlmHints] = useState<Record<number, string>>({});
+  const hints = useMemo(() => {
+    const arr = [task.hints[0] ?? '', task.hints[1] ?? '', task.explanation].filter(Boolean);
+    // подсказки, догенерированные LLM, добавляются в конец (уровни после локальных)
+    for (let lvl = arr.length + 1; lvl <= 3; lvl++) {
+      if (llmHints[lvl]) arr.push(llmHints[lvl]);
+    }
+    return arr;
+  }, [task, llmHints]);
   const passed = attempt?.verdict === 'pass' && verdict === 'pass';
+  const choiceSpec = task.answerSpec.kind === 'choice' ? task.answerSpec : null;
 
   const reRandomize = () => {
     if (!isParametric(task)) return;
@@ -382,10 +410,14 @@ function TaskTrial({
       // локальные подсказки кончились, LLM может сгенерировать ещё
       if (provider) {
         void (async () => {
-          const { genHint } = await import('@/lib/llm-ops');
-          const h = await genHint(provider, node, task, next);
-          hints[next - 1] = h;
-          setHintLevel(next);
+          try {
+            const { genHint } = await import('@/lib/llm-ops');
+            const h = await genHint(provider, node, task, next);
+            setLlmHints((prev) => ({ ...prev, [next]: h }));
+            setHintLevel(next);
+          } catch (e) {
+            toast.error(e instanceof Error ? e.message : 'Подсказка недоступна');
+          }
         })();
         return;
       }
@@ -406,11 +438,13 @@ function TaskTrial({
             </Button>
           ) : undefined}
         />
-        <p className="text-sm leading-snug">{instance.renderedPrompt}</p>
+        <p className="text-sm leading-snug">
+          <MathText>{instance.renderedPrompt}</MathText>
+        </p>
 
-        {task.type === 'choice' && task.answerSpec.kind === 'choice' ? (
+        {choiceSpec ? (
           <div className="flex flex-col gap-1.5">
-            {task.answerSpec.options.map((opt, i) => (
+            {choiceSpec.options.map((opt, i) => (
               <button
                 key={i}
                 disabled={passed}
@@ -418,10 +452,10 @@ function TaskTrial({
                 className={cn(
                   'rounded-lg border px-3 py-2.5 text-left text-sm transition-colors',
                   choiceIdx === i ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/40',
-                  passed && i === task.answerSpec.correctIndex && 'border-emerald-500/60 bg-emerald-500/10'
+                  passed && i === choiceSpec.correctIndex && 'border-emerald-500/60 bg-emerald-500/10'
                 )}
               >
-                {opt}
+                <MathText>{opt}</MathText>
               </button>
             ))}
           </div>
@@ -451,7 +485,9 @@ function TaskTrial({
         {hintLevel > 0 && (
           <div className="rounded-lg bg-muted/50 p-3 text-sm leading-snug">
             {hints.slice(0, hintLevel).map((h, i) => (
-              <p key={i} className={i > 0 ? 'mt-2 border-t border-border/60 pt-2' : ''}>{h}</p>
+              <p key={i} className={i > 0 ? 'mt-2 border-t border-border/60 pt-2' : ''}>
+                <MathText>{h}</MathText>
+              </p>
             ))}
           </div>
         )}
@@ -548,8 +584,19 @@ function OwnTaskTrial({
                 <span className="ml-auto flex items-center gap-1 text-xs font-medium text-amber-400"><XCircle className="h-4 w-4" /> доработай</span>
               )}
             </div>
-            {shown.answer && <p className="mt-2 text-muted-foreground">Ответ проверяющего: <b className="text-foreground">{shown.answer}</b></p>}
-            {shown.feedback && <p className="mt-1.5 leading-snug text-muted-foreground">{shown.feedback}</p>}
+            {shown.answer && (
+              <p className="mt-2 text-muted-foreground">
+                Ответ проверяющего:{' '}
+                <b className="text-foreground">
+                  <MathText>{shown.answer}</MathText>
+                </b>
+              </p>
+            )}
+            {shown.feedback && (
+              <p className="mt-1.5 leading-snug text-muted-foreground">
+                <MathText>{shown.feedback}</MathText>
+              </p>
+            )}
           </div>
         )}
       </CardContent>
