@@ -1,7 +1,7 @@
 'use client';
 
-import { useRef, useState, useSyncExternalStore } from 'react';
-import { Check, Copy, Download, Moon, Plug, Plus, ScrollText, Sun, Trash2, Upload } from 'lucide-react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { Check, ClipboardPaste, Copy, Download, Moon, Plug, Plus, ScrollText, Sun, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -16,7 +16,8 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { exportAll, importAll, resetMaterialProgress } from '@/lib/db';
+import { Textarea } from '@/components/ui/textarea';
+import { exportAll, importAll, resetMaterialProgress, getMeta, setMeta } from '@/lib/db';
 import {
   llmDebugClear,
   llmDebugSnapshot,
@@ -45,6 +46,20 @@ export default function SettingsPanel() {
   const [testing, setTesting] = useState(false);
 
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // импорт вставкой JSON — обход файлового пикера Android (на части устройств
+  // он убивает WebView → «page not found» вместо приложения)
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteJson, setPasteJson] = useState('');
+  const [importing, setImporting] = useState(false);
+
+  // настройки OCR (фото → текст через vision-модель)
+  const [ocrProviderId, setOcrProviderId] = useState('');
+  const [ocrModel, setOcrModel] = useState('');
+  useEffect(() => {
+    void getMeta('ocrProviderId').then((v) => v && setOcrProviderId(v));
+    void getMeta('ocrModel').then((v) => v && setOcrModel(v));
+  }, []);
 
   const applyPreset = (t: ProviderType) => {
     setPType(t);
@@ -96,11 +111,33 @@ export default function SettingsPanel() {
     toast.success('Бэкап скачан');
   };
 
+  const runImport = async (json: string, onDone?: () => void) => {
+    if (importing) return;
+    setImporting(true);
+    try {
+      const res = await importAll(json);
+      if (res.ok) toast.success(res.message);
+      else toast.error(res.message);
+      onDone?.();
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const doImport = async (file: File) => {
     const text = await file.text();
-    const res = await importAll(text);
-    if (res.ok) toast.success(res.message);
-    else toast.error(res.message);
+    await runImport(text);
+  };
+
+  const doPasteImport = () => {
+    if (pasteJson.trim().length < 10) {
+      toast.error('Вставь JSON бэкапа в поле');
+      return;
+    }
+    void runImport(pasteJson, () => {
+      setPasteOpen(false);
+      setPasteJson('');
+    });
   };
 
   const logEntries = useSyncExternalStore(llmDebugSubscribe, llmDebugSnapshot);
@@ -238,19 +275,46 @@ export default function SettingsPanel() {
           <CardContent className="flex flex-col gap-2 p-4">
             <p className="text-xs leading-relaxed text-muted-foreground">
               Все данные хранятся локально (IndexedDB). Экспорт — один JSON-файл: материалы, карта, задачи, попытки,
-              провайдеры. Импорт восстанавливает или объединяет.
+              черновики, провайдеры. Импорт восстанавливает или объединяет. На телефоне удобнее «Вставить JSON» —
+              без файлового пикера.
             </p>
             <div className="flex gap-2">
-              <Button variant="outline" className="flex-1" onClick={doExport}>
+              <Button variant="outline" className="flex-1" onClick={doExport} disabled={importing}>
                 <Download className="mr-1 h-4 w-4" /> Экспорт
               </Button>
-              <Button variant="outline" className="flex-1" onClick={() => fileRef.current?.click()}>
-                <Upload className="mr-1 h-4 w-4" /> Импорт
+              <Button variant="outline" className="flex-1" onClick={() => fileRef.current?.click()} disabled={importing}>
+                <Upload className="mr-1 h-4 w-4" /> Из файла
               </Button>
+              <Dialog open={pasteOpen} onOpenChange={setPasteOpen}>
+                <DialogTrigger asChild>
+                  <Button variant="outline" className="flex-1" disabled={importing}>
+                    <ClipboardPaste className="mr-1 h-4 w-4" /> Вставить JSON
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-h-[85dvh] overflow-y-auto thin-scroll">
+                  <DialogHeader>
+                    <DialogTitle>Импорт из JSON</DialogTitle>
+                  </DialogHeader>
+                  <p className="text-xs text-muted-foreground">
+                    Открой файл бэкапа любым редактором, скопируй содержимое целиком и вставь сюда.
+                  </p>
+                  <Textarea
+                    value={pasteJson}
+                    onChange={(e) => setPasteJson(e.target.value)}
+                    rows={10}
+                    className="resize-none font-mono text-[11px]"
+                    placeholder='{ "app": "edu_game", … }'
+                    disabled={importing}
+                  />
+                  <Button onClick={doPasteImport} disabled={importing || pasteJson.trim().length < 10}>
+                    {importing ? 'Импортирую…' : 'Импортировать'}
+                  </Button>
+                </DialogContent>
+              </Dialog>
               <input
                 ref={fileRef}
                 type="file"
-                accept=".json"
+                accept=".json,application/json"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -271,6 +335,51 @@ export default function SettingsPanel() {
             >
               Сбросить прогресс активного материала
             </Button>
+          </CardContent>
+        </Card>
+      </section>
+      {/* OCR с фото */}
+      <section className="pb-2">
+        <h2 className="mb-2 px-1 text-sm font-medium text-muted-foreground">OCR с фото (распознавание рукописного)</h2>
+        <Card>
+          <CardContent className="flex flex-col gap-3 p-4">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Кнопка «Фото с решением» в узле отправляет снимок в vision-модель. По умолчанию используется активный
+              провайдер и его модель; если модель не принимает изображения — выбери отдельного провайдера и/или
+              укажи vision-модель (gpt-4o-mini, gemini-flash, qwen-vl-plus и т.п.).
+            </p>
+            <div>
+              <Label className="mb-1.5 block">Провайдер для OCR</Label>
+              <Select
+                value={ocrProviderId || 'active'}
+                onValueChange={(v) => {
+                  const id = v === 'active' ? '' : v;
+                  setOcrProviderId(id);
+                  void setMeta('ocrProviderId', id);
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">Активный провайдер</SelectItem>
+                  {providers.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name} ({p.model})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="mb-1.5 block">Модель для OCR (пусто = модель провайдера)</Label>
+              <Input
+                value={ocrModel}
+                onChange={(e) => setOcrModel(e.target.value)}
+                onBlur={() => void setMeta('ocrModel', ocrModel.trim())}
+                placeholder="gpt-4o-mini"
+              />
+            </div>
           </CardContent>
         </Card>
       </section>

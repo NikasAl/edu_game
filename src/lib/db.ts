@@ -6,6 +6,7 @@ import type {
   LLMProvider,
   Material,
   MetaRec,
+  NodeDraft,
   NodeProgressRec,
   Region,
   Task,
@@ -21,6 +22,7 @@ export class EduGameDexie extends Dexie {
   tasks!: Table<Task, string>;
   attempts!: Table<Attempt, string>;
   progress!: Table<NodeProgressRec, string>;
+  drafts!: Table<NodeDraft, string>;
   meta!: Table<MetaRec, string>;
 
   constructor() {
@@ -48,6 +50,10 @@ export class EduGameDexie extends Dexie {
           if (m.orderIndex === undefined) m.orderIndex = 0;
         });
       });
+    // v3: черновики ответов пользователя (сохраняются даже неверные)
+    this.version(3).stores({
+      drafts: 'nodeId, materialId, updatedAt',
+    });
   }
 }
 
@@ -102,7 +108,7 @@ export async function seedDemoIfFirstRun(): Promise<boolean> {
 export async function exportAll(): Promise<string> {
   const payload = {
     app: 'edu_game',
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     materials: await db.materials.toArray(),
     regions: await db.regions.toArray(),
@@ -111,36 +117,97 @@ export async function exportAll(): Promise<string> {
     tasks: await db.tasks.toArray(),
     attempts: await db.attempts.toArray(),
     progress: await db.progress.toArray(),
+    drafts: await db.drafts.toArray(),
     providers: await db.providers.toArray(),
   };
   return JSON.stringify(payload, null, 2);
 }
 
+/** Ключи с датами у каждой таблицы — для оживления ISO-строк из JSON-бэкапа */
+const DATE_KEYS: Record<string, string[]> = {
+  materials: ['createdAt'],
+  nodes: ['createdAt'],
+  tasks: ['createdAt'],
+  attempts: ['createdAt'],
+  progress: ['updatedAt', 'masteredAt', 'srsDue'],
+  drafts: ['updatedAt'],
+  providers: ['createdAt', 'updatedAt'],
+};
+
+/**
+ * Оживить записи после JSON.parse: даты приходят строками в ISO-формате,
+ * а код приложения вызывает .getTime() и арифметику дат — без ревива
+ * после импорта бэкапа крашится рендер карты/узла.
+ */
+function reviveRows<T>(rows: unknown, table: string): T[] {
+  if (!Array.isArray(rows)) return [];
+  const keys = DATE_KEYS[table] ?? [];
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object') return row as T;
+    const o = { ...(row as Record<string, unknown>) };
+    for (const k of keys) {
+      const v = o[k];
+      if (typeof v === 'string' || typeof v === 'number') {
+        const d = new Date(v);
+        if (!Number.isNaN(d.getTime())) o[k] = d;
+      }
+    }
+    return o as T;
+  });
+}
+
+/** bulkPut порциями, с уступкой событийного цикла — крупный бэкап не блокирует UI надолго */
+async function chunkedPut(table: Table, rows: unknown[]): Promise<void> {
+  const CHUNK = 200;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await table.bulkPut(rows.slice(i, i + CHUNK) as never[]);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
 export async function importAll(json: string): Promise<{ ok: boolean; message: string }> {
   try {
-    const data = JSON.parse(json);
+    const data = JSON.parse(json) as Record<string, unknown>;
     if (data?.app !== 'edu_game' || !Array.isArray(data.nodes)) {
       return { ok: false, message: 'Неверный формат файла: ожидается бэкап edu_game' };
     }
-    await db.transaction('rw', [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress, db.providers], async () => {
-        // нормализация под дерево карт (бэкапы версии 1 не содержат parentId)
-        if (data.materials)
-          await db.materials.bulkPut(
-            (data.materials as Material[]).map((m) => ({
-              ...m,
-              parentId: m.parentId ?? null,
-              orderIndex: m.orderIndex ?? 0,
-            }))
-          );
-        if (data.regions) await db.regions.bulkPut(data.regions);
-        if (data.nodes) await db.nodes.bulkPut(data.nodes);
-        if (data.edges) await db.edges.bulkPut(data.edges);
-        if (data.tasks) await db.tasks.bulkPut(data.tasks);
-        if (data.attempts) await db.attempts.bulkPut(data.attempts);
-        if (data.progress) await db.progress.bulkPut(data.progress);
-        if (data.providers) await db.providers.bulkPut(data.providers);
-    });
-    const counts = `узлов: ${data.nodes.length}, задач: ${data.tasks?.length ?? 0}, попыток: ${data.attempts?.length ?? 0}`;
+
+    // Нормализация под дерево карт (бэкапы версии 1 не содержат parentId)
+    const materials = reviveRows<Material>(data.materials, 'materials').map((m) => ({
+      ...m,
+      parentId: m.parentId ?? null,
+      orderIndex: m.orderIndex ?? 0,
+    }));
+    const regions = reviveRows<Region>(data.regions, 'regions');
+    const nodes = reviveRows<IdeaNode>(data.nodes, 'nodes');
+    const edges = reviveRows<IdeaEdge>(data.edges, 'edges');
+    const tasks = reviveRows<Task>(data.tasks, 'tasks');
+    const attempts = reviveRows<Attempt>(data.attempts, 'attempts');
+    const progress = reviveRows<NodeProgressRec>(data.progress, 'progress');
+    const drafts = reviveRows<NodeDraft>(data.drafts, 'drafts').map((d) => ({
+      nodeId: d.nodeId,
+      materialId: d.materialId ?? '',
+      feynmanText: d.feynmanText ?? '',
+      taskAnswers: d.taskAnswers ?? {},
+      taskChoices: d.taskChoices ?? {},
+      ownTaskText: d.ownTaskText ?? '',
+      updatedAt: d.updatedAt ?? new Date(),
+    }));
+    const providers = reviveRows<LLMProvider>(data.providers, 'providers');
+
+    // Порционная запись без общей транзакции: уступаем UI между порциями
+    // (крупный бэкап на Android иначе блокирует/убивает WebView-рендерер)
+    if (materials.length) await chunkedPut(db.materials, materials);
+    if (regions.length) await chunkedPut(db.regions, regions);
+    if (nodes.length) await chunkedPut(db.nodes, nodes);
+    if (edges.length) await chunkedPut(db.edges, edges);
+    if (tasks.length) await chunkedPut(db.tasks, tasks);
+    if (attempts.length) await chunkedPut(db.attempts, attempts);
+    if (progress.length) await chunkedPut(db.progress, progress);
+    if (drafts.length) await chunkedPut(db.drafts, drafts);
+    if (providers.length) await chunkedPut(db.providers, providers);
+
+    const counts = `карт: ${materials.length}, узлов: ${nodes.length}, задач: ${tasks.length}, попыток: ${attempts.length}`;
     return { ok: true, message: `Импортировано (${counts})` };
   } catch (e) {
     return { ok: false, message: `Ошибка импорта: ${e instanceof Error ? e.message : 'неизвестная'}` };
@@ -175,10 +242,40 @@ export async function deleteMapCascade(rootId: string): Promise<number> {
         await db.tasks.where('materialId').equals(mid).delete();
         await db.attempts.where('materialId').equals(mid).delete();
         await db.progress.where('materialId').equals(mid).delete();
+        await db.drafts.where('materialId').equals(mid).delete();
       }
     }
   );
   return ids.length;
+}
+
+// ============ Черновики ответов ============
+
+/**
+ * Дописать часть черновика узла. Поля feynmanText/ownTaskText заменяются,
+ * taskAnswers/taskChoices сливаются по ключам — три испытания узла пишут
+ * в одну запись независимо друг от друга (UI дебаунсит ввод).
+ */
+export async function saveDraftPatch(
+  nodeId: string,
+  materialId: string,
+  patch: Partial<Pick<NodeDraft, 'feynmanText' | 'taskAnswers' | 'taskChoices' | 'ownTaskText'>>
+): Promise<void> {
+  const cur = await db.drafts.get(nodeId);
+  const next: NodeDraft = {
+    nodeId,
+    materialId,
+    feynmanText: cur?.feynmanText ?? '',
+    taskAnswers: { ...(cur?.taskAnswers ?? {}) },
+    taskChoices: { ...(cur?.taskChoices ?? {}) },
+    ownTaskText: cur?.ownTaskText ?? '',
+    updatedAt: new Date(),
+  };
+  if (patch.feynmanText !== undefined) next.feynmanText = patch.feynmanText;
+  if (patch.ownTaskText !== undefined) next.ownTaskText = patch.ownTaskText;
+  if (patch.taskAnswers) next.taskAnswers = { ...next.taskAnswers, ...patch.taskAnswers };
+  if (patch.taskChoices) next.taskChoices = { ...next.taskChoices, ...patch.taskChoices };
+  await db.drafts.put(next);
 }
 
 /** id карты + id всех её потомков (защита от циклов включена) */

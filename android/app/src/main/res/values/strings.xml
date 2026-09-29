@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Edu Game</string>
+    <string name="title_activity_main">Edu Game</string>
+    <string name="package_name">ru.nikasal.edugame</string>
+    <string name="custom_url_scheme">ru.nikasal.edugame</string>
+</resources>

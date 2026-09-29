@@ -204,6 +204,20 @@ export interface NodeProgressRec {
   updatedAt: Date;
 }
 
+/**
+ * Черновик ответов пользователя в узле: всё, что набрано, сохраняется
+ * (в том числе неверные ответы) и восстанавливается при повторном входе.
+ */
+export interface NodeDraft {
+  nodeId: string; // PK
+  materialId: string;
+  feynmanText: string;
+  taskAnswers: Record<string, string>; // taskId → набранный ответ
+  taskChoices: Record<string, number>; // taskId → выбранный индекс варианта
+  ownTaskText: string;
+  updatedAt: Date;
+}
+
 // ============ LLM-операции ============
 
 /** Результат проверки фейнмановского объяснения */
@@ -268,6 +282,7 @@ export interface BackupPayload {
   attempts: Attempt[];
   progress: NodeProgressRec[];
   providers: LLMProvider[];
+  drafts?: NodeDraft[];
 }
 
 export const NODE_STATUS_META: Record<

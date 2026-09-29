@@ -16,8 +16,14 @@ import { extractJson } from './llm-json';
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  /** Строка — обычный текст; массив — мультимодальное сообщение (OCR/визион) */
+  content: string | LLMContentPart[];
 }
+
+/** Часть мультимодального сообщения (OpenAI-совместимый формат) */
+export type LLMContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
 
 export interface LLMResponse {
   content: string;
@@ -78,6 +84,25 @@ function pushLogEntry(entry: LLMLogEntry) {
   relayToServer(entry);
 }
 
+/**
+ * Заменить base64-изображения в сообщениях на короткую пометку —
+ * иначе журнал/UI/релей раздуваются мегабайтами данных.
+ */
+function sanitizeMessagesForLog(messages: LLMMessage[]): LLMMessage[] {
+  return messages.map((m) => {
+    if (typeof m.content === 'string') return m;
+    const text = m.content
+      .map((p) => {
+        if (p.type === 'text') return p.text;
+        const url = p.image_url?.url ?? '';
+        const kb = Math.round((url.length * 0.75) / 1024);
+        return `[изображение ~${kb} КБ]`;
+      })
+      .join('\n');
+    return { ...m, content: text };
+  });
+}
+
 function logToConsole(entry: LLMLogEntry) {
   const tag = `LLM ${entry.op}`;
   const head = `${entry.ok ? '✓' : '✗'} ${entry.model} HTTP ${entry.status ?? '—'} ${entry.durationMs} мс (попыток: ${entry.attempts})`;
@@ -100,7 +125,10 @@ function relayToServer(entry: LLMLogEntry) {
   const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…[обрезано]' : s);
   const payload = {
     ...entry,
-    requestMessages: entry.requestMessages.map((m) => ({ ...m, content: clip(m.content, 6000) })),
+    requestMessages: entry.requestMessages.map((m) => ({
+      ...m,
+      content: clip(typeof m.content === 'string' ? m.content : '[мультимодальное сообщение]', 6000),
+    })),
     rawResponse: clip(entry.rawResponse, 8000),
     content: clip(entry.content, 4000),
   };
@@ -212,7 +240,7 @@ export async function testProvider(provider: LLMProvider): Promise<{ ok: boolean
 export async function callLLM(
   provider: LLMProvider,
   messages: LLMMessage[],
-  options: { temperature?: number; maxTokens?: number; op?: string } = {}
+  options: { temperature?: number; maxTokens?: number; op?: string; jsonMode?: boolean } = {}
 ): Promise<LLMResponse> {
   const op = options.op ?? 'call';
   const url = `${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`;
@@ -228,7 +256,7 @@ export async function callLLM(
   try {
     // --- попытка 1 ---
     attempts++;
-    let res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: true });
+    let res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false });
     lastStatus = res.status;
     lastRaw = res.body;
 
@@ -240,7 +268,7 @@ export async function callLLM(
     ) {
       await new Promise((r) => setTimeout(r, 2500));
       attempts++;
-      res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: true });
+      res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false });
       lastStatus = res.status;
       lastRaw = res.body;
     }
@@ -267,7 +295,7 @@ export async function callLLM(
     if (!content.trim() && finishReason === 'length' && maxTokens !== undefined && maxTokens * 2 <= 100000) {
       attempts++;
       maxTokens = maxTokens * 2;
-      const res2 = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: true });
+      const res2 = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false });
       lastStatus = res2.status;
       lastRaw = res2.body;
       if (res2.status >= 200 && res2.status < 300) {
@@ -290,7 +318,7 @@ export async function callLLM(
       attempts,
       finishReason: lastFinish || undefined,
       usage: lastUsage,
-      requestMessages: messages,
+      requestMessages: sanitizeMessagesForLog(messages),
       content,
       rawResponse: rawText || lastRaw.slice(0, 8000),
       error: content.trim()
@@ -331,7 +359,7 @@ export async function callLLM(
         attempts,
         finishReason: lastFinish || undefined,
         usage: lastUsage,
-        requestMessages: messages,
+        requestMessages: sanitizeMessagesForLog(messages),
         content: '',
         rawResponse: lastRaw.slice(0, 8000),
         error: message,

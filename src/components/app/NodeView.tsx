@@ -10,9 +10,11 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import MathText from '@/components/MathText';
+import PhotoOcr from '@/components/app/PhotoOcr';
 import { db, setMeta } from '@/lib/db';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
+import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
 import { checkAnswer, instantiateTask, isParametric } from '@/lib/task-engine';
 import { gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
 import type { Attempt, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
@@ -132,12 +134,12 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
           )}
 
           {/* Испытание 1: Фейнман */}
-          <FeynmanTrial node={node} attempt={feynmanA} provider={activeProvider} />
+          <FeynmanTrial key={`f:${nodeId}`} node={node} attempt={feynmanA} provider={activeProvider} />
 
           {/* Испытание 2: Задачи */}
           {tasks.map((task, i) => (
             <TaskTrial
-              key={task.id}
+              key={`${nodeId}:${task.id}`}
               task={task}
               index={i}
               node={node}
@@ -147,7 +149,7 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
           ))}
 
           {/* Испытание 3: Своя задача */}
-          <OwnTaskTrial node={node} attempt={ownA} provider={activeProvider} />
+          <OwnTaskTrial key={`o:${nodeId}`} node={node} attempt={ownA} provider={activeProvider} />
         </div>
       </div>
     </div>
@@ -232,7 +234,13 @@ function FeynmanTrial({
   attempt?: Attempt;
   provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
 }) {
-  const [text, setText] = useState('');
+  // черновик объяснения: сохраняется даже без отправки на проверку
+  const [text, setText] = useNodeDraft({
+    nodeId: node.id,
+    materialId: node.materialId,
+    field: 'feynmanText',
+    attemptAnswer: attempt?.userAnswer,
+  });
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<FeynmanGrade | null>(null);
   const passed = attempt?.verdict === 'pass';
@@ -289,6 +297,12 @@ function FeynmanTrial({
           onChange={(e) => setText(e.target.value)}
           rows={5}
           className="resize-none"
+          disabled={busy}
+        />
+        <PhotoOcr
+          mode="full"
+          label="Фото с решением"
+          onInsert={(t) => setText((prev) => (prev ? `${prev}\n${t}` : t))}
           disabled={busy}
         />
         {!passed && (
@@ -358,8 +372,21 @@ function TaskTrial({
   provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
 }) {
   const [instance, setInstance] = useState<TaskInstance>(() => instantiateTask(task));
-  const [input, setInput] = useState('');
-  const [choiceIdx, setChoiceIdx] = useState<number | null>(null);
+
+  // черновик ответа: набранный текст/вариант сохраняются и восстанавливаются
+  const attemptChoiceIdx = useMemo(() => {
+    if (task.answerSpec.kind !== 'choice' || !attempt) return undefined;
+    const idx = task.answerSpec.options.findIndex((o) => o === attempt.userAnswer);
+    return idx >= 0 ? idx : undefined;
+  }, [task, attempt]);
+  const { input, setInput, choiceIdx, setChoiceIdx } = useTaskAnswerDraft({
+    nodeId: node.id,
+    materialId: node.materialId,
+    taskId: task.id,
+    attemptAnswer: attempt?.userAnswer,
+    attemptChoiceIdx,
+  });
+
   const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(attempt?.verdict === 'pass' ? 'pass' : null);
   const [correctShown, setCorrectShown] = useState<string | null>(null);
   const [hintLevel, setHintLevel] = useState(0);
@@ -470,6 +497,13 @@ function TaskTrial({
               inputMode="text"
               className="h-10 flex-1 rounded-lg border border-input bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-primary"
             />
+            {!passed && (
+              <PhotoOcr
+                mode="short"
+                label=""
+                onInsert={(t) => setInput(t)}
+              />
+            )}
           </div>
         )}
 
@@ -513,7 +547,13 @@ function OwnTaskTrial({
   attempt?: Attempt;
   provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
 }) {
-  const [text, setText] = useState('');
+  // черновик своей задачи: сохраняется даже без отправки на проверку
+  const [text, setText] = useNodeDraft({
+    nodeId: node.id,
+    materialId: node.materialId,
+    field: 'ownTaskText',
+    attemptAnswer: attempt?.userAnswer,
+  });
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<OwnTaskVerdict | null>(null);
   const passed = attempt?.verdict === 'pass';
@@ -566,6 +606,12 @@ function OwnTaskTrial({
           onChange={(e) => setText(e.target.value)}
           rows={4}
           className="resize-none"
+          disabled={busy}
+        />
+        <PhotoOcr
+          mode="full"
+          label="Фото с решением"
+          onInsert={(t) => setText((prev) => (prev ? `${prev}\n${t}` : t))}
           disabled={busy}
         />
         {!passed && (

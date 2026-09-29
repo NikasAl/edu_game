@@ -315,6 +315,45 @@ export async function genHint(
   return res.content.trim();
 }
 
+// ============ 6. OCR рукописного решения (vision) ============
+
+const OCR_PROMPT_FULL = `Ты — точная OCR-система. На изображении — фрагмент рукописного или печатного решения. Распознай ВЕСЬ текст выделенной области:
+- сохрани порядок и структуру строк;
+- математические выражения перепиши в LaTeX: строчные формулы — в \\( ... \\), отдельные строки — в \\[ ... \\];
+- не решай задачу и не добавляй ничего от себя;
+- неразборчивый фрагмент помечай как [неразборчиво].
+Верни ТОЛЬКО распознанный текст, без комментариев и без markdown-заборов.`;
+
+const OCR_PROMPT_SHORT = `На изображении — рукописное решение задачи. Верни ТОЛЬКО итоговый ответ (число, выражение или слово) — как он записан в конце решения. Без пояснений. Если итогового ответа нет — верни самую релевантную строку с результатом.`;
+
+/**
+ * Распознать текст с фотографии решения (OpenAI-совместимый vision-запрос).
+ * Требуется модель, принимающая изображения (gpt-4o-mini, gemini-flash, qwen-vl и т.п.).
+ */
+export async function ocrHandwritten(
+  provider: LLMProvider,
+  imageDataUrl: string,
+  mode: 'full' | 'short'
+): Promise<string> {
+  const base64 = imageDataUrl.includes(',') ? imageDataUrl.split(',')[1] : imageDataUrl;
+  const messages: LLMMessage[] = [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: mode === 'short' ? OCR_PROMPT_SHORT : OCR_PROMPT_FULL },
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } },
+      ],
+    },
+  ];
+  const res = await callLLM(provider, messages, {
+    temperature: 0,
+    maxTokens: 4000,
+    op: 'ocr',
+    jsonMode: false,
+  });
+  return res.content.trim();
+}
+
 // ============ utils ============
 
 function clampInt(v: unknown, min: number, max: number): number {
