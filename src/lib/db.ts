@@ -232,7 +232,9 @@ export async function deleteMapCascade(rootId: string): Promise<number> {
   const ids = collectSubtreeIds(all, rootId);
   await db.transaction(
     'rw',
-    [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress],
+    // drafts обязана входить в область транзакции — иначе обращения к ней внутри
+    // падают с «The specified object store was not found» и карта не удаляется
+    [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress, db.drafts],
     async () => {
       await db.materials.bulkDelete(ids);
       for (const mid of ids) {

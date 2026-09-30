@@ -1,8 +1,21 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowRight, FileText, Loader2, Map as MapIcon, Save, Sparkles, TriangleAlert } from 'lucide-react';
+import {
+  ArrowRight,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Link2,
+  Loader2,
+  Map as MapIcon,
+  Save,
+  Sparkles,
+  TriangleAlert,
+  Type,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,10 +30,15 @@ import { ingestSplitIntoIdeas, genTasksForAtom, generatedToTask, validateIngest 
 import { hasCycle } from '@/lib/progress';
 import { normalizeText } from '@/lib/safeMath';
 import { getPathToRoot, nextOrderIndex } from '@/lib/maps';
+import { extractFromPdf, extractFromUrl, type ExtractedSection } from '@/lib/extract';
 import type { EdgeKind, IdeaEdge, IdeaNode, Material, Region, Task } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 
-type Phase = 'input' | 'parsing' | 'review' | 'tasks';
+type Phase = 'input' | 'extract' | 'parsing' | 'review' | 'tasks';
+type SourceMode = 'paste' | 'url' | 'pdf';
+
+/** За один раз в анализ попадает не больше этого числа знаков (см. llm-ops) */
+const ANALYZE_LIMIT = 24000;
 
 export default function ImportPanel() {
   const providers = useAppStore((s) => s.providers);
@@ -37,6 +55,20 @@ export default function ImportPanel() {
   const [phase, setPhase] = useState<Phase>('input');
   const [progressMsg, setProgressMsg] = useState('');
   const [progressVal, setProgressVal] = useState(0);
+
+  // источники текста
+  const [sourceMode, setSourceMode] = useState<SourceMode>('paste');
+  const [urlValue, setUrlValue] = useState('');
+  const [urlBusy, setUrlBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
+
+  // фаза выбора секций (URL/PDF)
+  const [extractTitle, setExtractTitle] = useState('');
+  const [extractSource, setExtractSource] = useState('');
+  const [sections, setSections] = useState<ExtractedSection[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [openSectionId, setOpenSectionId] = useState<string | null>(null);
 
   const materials = useLiveQuery(() => db.materials.toArray(), []);
   // куда поместить новую карту: 'root' или id существующей карты
@@ -71,6 +103,83 @@ export default function ImportPanel() {
       toast.error(e instanceof Error ? e.message : 'Не удалось разобрать материал');
       setPhase('input');
     }
+  };
+
+  // ============ Извлечение из URL / PDF ============
+
+  const openExtract = (res: { title: string; sections: ExtractedSection[]; warning?: string; viaReader?: boolean }, sourceLabel: string) => {
+    if (res.sections.length === 0) {
+      toast.error('Не удалось извлечь текст: нет подходящих разделов');
+      return;
+    }
+    setExtractTitle(res.title || '');
+    setExtractSource(sourceLabel);
+    setSections(res.sections);
+    setSelectedIds(new Set(res.sections.map((s) => s.id)));
+    setOpenSectionId(res.sections.length === 1 ? res.sections[0].id : null);
+    setPhase('extract');
+    if (res.warning) toast.warning(res.warning);
+    if (res.viaReader) toast.info('Прямая загрузка заблокирована (CORS) — текст получен через reader-прокси');
+  };
+
+  const runUrl = async () => {
+    if (!/^https?:\/\//i.test(urlValue.trim())) {
+      toast.error('Введи ссылку, начинающуюся с http:// или https://');
+      return;
+    }
+    setUrlBusy(true);
+    try {
+      const res = await extractFromUrl(urlValue.trim());
+      openExtract(res, urlValue.trim());
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось загрузить страницу');
+    } finally {
+      setUrlBusy(false);
+    }
+  };
+
+  const runPdf = async (file: File) => {
+    setPdfBusy(true);
+    setProgressMsg('Читаю PDF…');
+    try {
+      const buf = await file.arrayBuffer();
+      const res = await extractFromPdf(buf, file.name, setProgressMsg);
+      openExtract(res, file.name);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось разобрать PDF');
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
+  const toggleSection = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectedSections = sections.filter((s) => selectedIds.has(s.id));
+  const selectedChars = selectedSections.reduce((n, s) => n + s.text.length, 0);
+
+  const applyExtract = () => {
+    if (selectedSections.length === 0) {
+      toast.error('Отметь хотя бы один раздел');
+      return;
+    }
+    const text = selectedSections.map((s) => s.text.trim()).join('\n\n');
+    if (text.trim().length < 500) {
+      toast.error('Выбрано слишком мало текста: нужно хотя бы ~500 знаков');
+      return;
+    }
+    setIngestDraft(extractTitle.trim() || ingestTitle, text);
+    setSourceMode('paste');
+    setPhase('input');
+    toast.success(
+      `Добавлено разделов: ${selectedSections.length} (${text.length} знаков). Проверь текст и нажми «Разобрать на атомы»`
+    );
   };
 
   const saveMaterial = async () => {
@@ -172,12 +281,19 @@ export default function ImportPanel() {
     }
   };
 
+  const SOURCE_TABS: { id: SourceMode; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+    { id: 'paste', label: 'Текст', icon: Type },
+    { id: 'url', label: 'Ссылка', icon: Link2 },
+    { id: 'pdf', label: 'PDF', icon: FileText },
+  ];
+
   return (
     <div className="flex flex-col gap-4">
       <header>
         <h1 className="text-lg font-semibold">Импорт материала</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Вставь текст учебника/статьи — LLM выделит атомы идей, построит граф зависимостей и сгенерирует задания.
+          Вставь текст, укажи ссылку на статью или загрузи PDF — LLM выделит атомы идей, построит граф зависимостей
+          и сгенерирует задания.
         </p>
       </header>
 
@@ -191,9 +307,211 @@ export default function ImportPanel() {
         </div>
       )}
 
+      {/* ============ Фаза выбора секций извлечения ============ */}
+      {phase === 'extract' && (
+        <Card>
+          <CardContent className="flex flex-col gap-3 p-4">
+            <div>
+              <p className="text-xs text-muted-foreground">Источник: {extractSource}</p>
+              <label className="mb-1.5 mt-2 block text-xs font-medium text-muted-foreground">
+                Название материала
+              </label>
+              <Input
+                value={extractTitle}
+                onChange={(e) => setExtractTitle(e.target.value)}
+                placeholder="Название — заполнено из источника, можно поправить"
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2"
+                  onClick={() => setSelectedIds(new Set(sections.map((s) => s.id)))}
+                >
+                  Выбрать все
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2"
+                  onClick={() => setSelectedIds(new Set())}
+                >
+                  Снять все
+                </Button>
+              </div>
+              <Badge variant={selectedChars > ANALYZE_LIMIT ? 'destructive' : 'secondary'}>
+                {selectedSections.length}/{sections.length} · {selectedChars.toLocaleString('ru-RU')} знаков
+              </Badge>
+            </div>
+
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Отметь разделы, из которых собрать материал — по каждому доступен предпросмотр. В анализ за один раз
+              попадает до ~{ANALYZE_LIMIT.toLocaleString('ru-RU')} знаков: большой документ лучше импортировать
+              несколькими картами.
+            </p>
+
+            <div className="flex flex-col gap-1">
+              {sections.map((s) => {
+                const selected = selectedIds.has(s.id);
+                const open = openSectionId === s.id;
+                return (
+                  <div
+                    key={s.id}
+                    className={`rounded-lg border transition-colors ${
+                      selected ? 'border-primary/40 bg-primary/5' : 'border-border bg-card'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 px-2 py-1.5">
+                      <button
+                        onClick={() => toggleSection(s.id)}
+                        className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
+                          selected ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40'
+                        }`}
+                        aria-label={selected ? 'Снять отметку' : 'Отметить раздел'}
+                        aria-pressed={selected}
+                      >
+                        {selected && <Check className="h-3.5 w-3.5" />}
+                      </button>
+                      <button
+                        onClick={() => setOpenSectionId(open ? null : s.id)}
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                        title="Предпросмотр текста"
+                      >
+                        {open ? (
+                          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className={`truncate text-sm ${selected ? '' : 'text-muted-foreground'}`}>
+                          {s.title}
+                        </span>
+                      </button>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        {s.text.length.toLocaleString('ru-RU')}
+                      </span>
+                    </div>
+                    {open && (
+                      <pre className="mx-2 mb-2 max-h-40 overflow-y-auto thin-scroll whitespace-pre-wrap break-words rounded bg-muted/50 p-2 text-[11px] leading-relaxed text-muted-foreground">
+                        {s.text}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => {
+                  setPhase('input');
+                  setSections([]);
+                  setSelectedIds(new Set());
+                }}
+              >
+                Отмена
+              </Button>
+              <Button className="flex-1" onClick={applyExtract} disabled={selectedSections.length === 0}>
+                <ArrowRight className="mr-1 h-4 w-4" /> Применить выбранные
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ============ Фаза ввода ============ */}
       {(phase === 'input' || phase === 'parsing') && (
         <Card>
           <CardContent className="flex flex-col gap-3 p-4">
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Источник текста</label>
+              <div className="grid grid-cols-3 gap-1 rounded-xl bg-muted/60 p-1">
+                {SOURCE_TABS.map(({ id, label, icon: Icon }) => (
+                  <button
+                    key={id}
+                    onClick={() => setSourceMode(id)}
+                    disabled={phase !== 'input'}
+                    className={`flex min-h-[36px] items-center justify-center gap-1.5 rounded-lg px-2 text-xs transition-colors ${
+                      sourceMode === id
+                        ? 'bg-card font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    } ${phase !== 'input' ? 'opacity-60' : ''}`}
+                    aria-pressed={sourceMode === id}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {sourceMode === 'url' && (
+              <div className="flex flex-col gap-2 rounded-xl border border-border/70 bg-muted/30 p-3">
+                <Input
+                  value={urlValue}
+                  onChange={(e) => setUrlValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !urlBusy) void runUrl();
+                  }}
+                  placeholder="https://example.com/article"
+                  inputMode="url"
+                  disabled={urlBusy}
+                />
+                <div className="flex items-center gap-2">
+                  <Button className="flex-1" onClick={() => void runUrl()} disabled={urlBusy}>
+                    {urlBusy ? (
+                      <>
+                        <Loader2 className="mr-1 h-4 w-4 animate-spin" /> Загружаю…
+                      </>
+                    ) : (
+                      <>
+                        <Link2 className="mr-1 h-4 w-4" /> Загрузить статью
+                      </>
+                    )}
+                  </Button>
+                </div>
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  Статья будет разбита по заголовкам на разделы — выбери нужные. На Android загрузка идёт через
+                  нативный HTTP без CORS; в браузере при блокировке — через reader-прокси.
+                </p>
+              </div>
+            )}
+
+            {sourceMode === 'pdf' && (
+              <div className="flex flex-col gap-2 rounded-xl border border-border/70 bg-muted/30 p-3">
+                <input
+                  ref={pdfInputRef}
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void runPdf(f);
+                    e.target.value = '';
+                  }}
+                />
+                <Button className="w-full" onClick={() => pdfInputRef.current?.click()} disabled={pdfBusy}>
+                  {pdfBusy ? (
+                    <>
+                      <Loader2 className="mr-1 h-4 w-4 animate-spin" /> {progressMsg || 'Читаю PDF…'}
+                    </>
+                  ) : (
+                    <>
+                      <FileText className="mr-1 h-4 w-4" /> Выбрать PDF-файл
+                    </>
+                  )}
+                </Button>
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  Подходят PDF с текстовым слоем. Если в файле есть оглавление — разделы создадутся по его пунктам,
+                  иначе по страницам. Сканы страниц без текста не поддерживаются.
+                </p>
+              </div>
+            )}
+
             <div>
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Название материала</label>
               <Input
@@ -235,13 +553,17 @@ export default function ImportPanel() {
             </div>
             <div>
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                Текст материала ({ingestSourceText.length} знаков)
+                Текст материала ({ingestSourceText.length.toLocaleString('ru-RU')} знаков)
               </label>
               <Textarea
                 value={ingestSourceText}
                 onChange={(e) => setIngestDraft(ingestTitle, e.target.value)}
-                placeholder="Вставь сюда главу учебника, статью или конспект…"
-                rows={10}
+                placeholder={
+                  sourceMode === 'paste'
+                    ? 'Вставь сюда главу учебника, статью или конспект…'
+                    : 'Поле заполнится после выбора разделов из источника — потом можно подредактировать'
+                }
+                rows={sourceMode === 'paste' ? 10 : 6}
                 className="resize-none"
                 disabled={phase !== 'input'}
               />
@@ -286,7 +608,7 @@ export default function ImportPanel() {
           При первом запуске в систему добавлен демо-курс «Алгебра и начала анализа: Производная» — 12 атомов идей,
           гибридный граф зависимостей и 24 параметрические задачи с автопроверкой. Его можно пройти целиком без LLM:
           локальный демо-оценщик проверит фейнмановские объяснения. Импортированный материал станет отдельной картой
-          (можно вложить в существующую) — все карты доступны через кнопку «Карты».
+          (можно вложить в существующую) — все карты собраны во вкладке «Карты».
         </CardContent>
       </Card>
     </div>

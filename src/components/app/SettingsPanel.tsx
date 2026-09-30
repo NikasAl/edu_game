@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Check, ClipboardPaste, Copy, Download, Moon, Plug, Plus, ScrollText, Sun, Trash2, Upload } from 'lucide-react';
+import { Check, Copy, Download, Moon, Plug, Plus, ScrollText, Share2, Sun, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -16,8 +16,8 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
 import { exportAll, importAll, resetMaterialProgress, getMeta, setMeta } from '@/lib/db';
+import { isNativePlatform } from '@/lib/nativeHttp';
 import {
   llmDebugClear,
   llmDebugSnapshot,
@@ -27,6 +27,9 @@ import {
 } from '@/lib/llm-client';
 import { useAppStore, type Theme } from '@/store/useAppStore';
 import { PROVIDER_PRESETS, type ProviderType } from '@/lib/types';
+
+/** Платформенная среда неизменна за сессию — подписка не нужна */
+const subscribeNoop = () => () => {};
 
 export default function SettingsPanel() {
   const providers = useAppStore((s) => s.providers);
@@ -47,10 +50,15 @@ export default function SettingsPanel() {
 
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // импорт вставкой JSON — обход файлового пикера Android (на части устройств
-  // он убивает WebView → «page not found» вместо приложения)
-  const [pasteOpen, setPasteOpen] = useState(false);
-  const [pasteJson, setPasteJson] = useState('');
+  // «Поделиться» доступно только в нативной среде (Android/Capacitor).
+  // useSyncExternalStore: false на сервере/в статике, реальное значение — на клиенте,
+  // без setState в эффекте и без расхождения гидратации
+  const isNative = useSyncExternalStore(
+    subscribeNoop,
+    isNativePlatform,
+    () => false
+  );
+
   const [importing, setImporting] = useState(false);
 
   // настройки OCR (фото → текст через vision-модель)
@@ -99,16 +107,42 @@ export default function SettingsPanel() {
     else toast.error(res.message);
   };
 
-  const doExport = async () => {
-    const json = await exportAll();
+  const downloadBackup = (json: string, fname: string) => {
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `edu-game-backup-${new Date().toISOString().split('T')[0]}.json`;
+    a.download = fname;
     a.click();
     URL.revokeObjectURL(url);
     toast.success('Бэкап скачан');
+  };
+
+  const doExport = async () => {
+    const json = await exportAll();
+    const fname = `edu-game-backup-${new Date().toISOString().split('T')[0]}.json`;
+    if (isNative) {
+      try {
+        // на Android — системное меню «Поделиться»: файл можно отправить
+        // в мессенджер/почту и передать на другое устройство
+        const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
+        const { Share } = await import('@capacitor/share');
+        const res = await Filesystem.writeFile({
+          path: fname,
+          data: json,
+          directory: Directory.Cache,
+          encoding: Encoding.UTF8,
+        });
+        await Share.share({ title: fname, files: [res.uri], dialogTitle: 'Отправить бэкап…' });
+        toast.success('Бэкап сохранён во временный файл — отправь его себе в мессенджере');
+        return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/cancel|отмен/i.test(msg)) return;
+        toast.error(`Не удалось открыть меню «Поделиться» (${msg}) — скачиваю файл`);
+      }
+    }
+    downloadBackup(json, fname);
   };
 
   const runImport = async (json: string, onDone?: () => void) => {
@@ -127,17 +161,6 @@ export default function SettingsPanel() {
   const doImport = async (file: File) => {
     const text = await file.text();
     await runImport(text);
-  };
-
-  const doPasteImport = () => {
-    if (pasteJson.trim().length < 10) {
-      toast.error('Вставь JSON бэкапа в поле');
-      return;
-    }
-    void runImport(pasteJson, () => {
-      setPasteOpen(false);
-      setPasteJson('');
-    });
   };
 
   const logEntries = useSyncExternalStore(llmDebugSubscribe, llmDebugSnapshot);
@@ -274,43 +297,25 @@ export default function SettingsPanel() {
         <Card>
           <CardContent className="flex flex-col gap-2 p-4">
             <p className="text-xs leading-relaxed text-muted-foreground">
-              Все данные хранятся локально (IndexedDB). Экспорт — один JSON-файл: материалы, карта, задачи, попытки,
-              черновики, провайдеры. Импорт восстанавливает или объединяет. На телефоне удобнее «Вставить JSON» —
-              без файлового пикера.
+              Все данные хранятся локально (IndexedDB). Экспорт — один JSON-файл: материалы, карты, задачи, попытки,
+              черновики, провайдеры. На телефоне файл открывается в системном меню «Поделиться» — отправь его себе в
+              мессенджере, чтобы перенести на другое устройство. Импорт восстанавливает или объединяет данные.
             </p>
             <div className="flex gap-2">
               <Button variant="outline" className="flex-1" onClick={doExport} disabled={importing}>
-                <Download className="mr-1 h-4 w-4" /> Экспорт
+                {isNative ? (
+                  <>
+                    <Share2 className="mr-1 h-4 w-4" /> Поделиться
+                  </>
+                ) : (
+                  <>
+                    <Download className="mr-1 h-4 w-4" /> Экспорт
+                  </>
+                )}
               </Button>
               <Button variant="outline" className="flex-1" onClick={() => fileRef.current?.click()} disabled={importing}>
                 <Upload className="mr-1 h-4 w-4" /> Из файла
               </Button>
-              <Dialog open={pasteOpen} onOpenChange={setPasteOpen}>
-                <DialogTrigger asChild>
-                  <Button variant="outline" className="flex-1" disabled={importing}>
-                    <ClipboardPaste className="mr-1 h-4 w-4" /> Вставить JSON
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="max-h-[85dvh] overflow-y-auto thin-scroll">
-                  <DialogHeader>
-                    <DialogTitle>Импорт из JSON</DialogTitle>
-                  </DialogHeader>
-                  <p className="text-xs text-muted-foreground">
-                    Открой файл бэкапа любым редактором, скопируй содержимое целиком и вставь сюда.
-                  </p>
-                  <Textarea
-                    value={pasteJson}
-                    onChange={(e) => setPasteJson(e.target.value)}
-                    rows={10}
-                    className="resize-none font-mono text-[11px]"
-                    placeholder='{ "app": "edu_game", … }'
-                    disabled={importing}
-                  />
-                  <Button onClick={doPasteImport} disabled={importing || pasteJson.trim().length < 10}>
-                    {importing ? 'Импортирую…' : 'Импортировать'}
-                  </Button>
-                </DialogContent>
-              </Dialog>
               <input
                 ref={fileRef}
                 type="file"

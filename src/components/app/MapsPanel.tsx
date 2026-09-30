@@ -1,9 +1,10 @@
 'use client';
 
 /**
- * Менеджер карт: дерево карт с операциями —
+ * Страница «Карты» (вкладка в нижней навигации): дерево карт с операциями —
  * войти, создать (корневую/подраздел), переименовать, переместить, удалить.
  * Карта — контейнер связанных идей; дерево задаётся Material.parentId.
+ * Операции по карте открываются компактными диалогами поверх страницы.
  */
 import { useMemo, useState } from 'react';
 import {
@@ -42,7 +43,7 @@ type DialogState =
   | { kind: 'delete'; target: Material }
   | null;
 
-export default function MapsManager({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+export default function MapsPanel() {
   const { ready, materials, stats } = useMapStats();
   const activeMaterialId = useAppStore((s) => s.activeMaterialId);
   const setActiveMaterialId = useAppStore((s) => s.setActiveMaterialId);
@@ -57,7 +58,6 @@ export default function MapsManager({ open, onOpenChange }: { open: boolean; onO
   const enter = async (id: string) => {
     await setActiveMaterialId(id);
     setActiveTab('map');
-    onOpenChange(false);
   };
 
   const toggle = (id: string) => {
@@ -156,39 +156,40 @@ export default function MapsManager({ open, onOpenChange }: { open: boolean; onO
   };
 
   return (
-    <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-h-[80dvh] overflow-y-auto sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Мои карты</DialogTitle>
-            <DialogDescription>
-              Карта — контейнер связанных идей. Внутри карты могут лежать другие карты: входи в них прямо с графа.
-            </DialogDescription>
-          </DialogHeader>
+    <div className="flex flex-col gap-4">
+      <header className="flex items-start justify-between gap-2">
+        <div>
+          <h1 className="text-lg font-semibold">Мои карты</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Карта — контейнер связанных идей. Внутри карты могут лежать другие карты: входи в них прямо с графа.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" className="shrink-0" onClick={() => setDialog({ kind: 'createRoot' })}>
+          <Plus className="mr-1 h-4 w-4" /> Новая
+        </Button>
+      </header>
 
-          <div className="flex flex-col gap-1">
-            {!ready ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">Загрузка…</p>
-            ) : roots.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">
-                Пока нет карт. Создай первую или импортируй материал.
-              </p>
-            ) : (
-              roots.map((m) => renderRow(m, 0))
-            )}
-          </div>
+      <div className="flex flex-col gap-1">
+        {!ready ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">Загрузка…</p>
+        ) : roots.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            Пока нет карт. Создай первую или импортируй материал.
+          </p>
+        ) : (
+          roots.map((m) => renderRow(m, 0))
+        )}
+      </div>
 
-          <DialogFooter className="flex-row gap-2">
-            <Button
-              variant="outline"
-              className="flex-1"
-              onClick={() => setDialog({ kind: 'createRoot' })}
-            >
-              <Plus className="mr-1 h-4 w-4" /> Новая карта
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {roots.length > 0 && (
+        <Button
+          variant="outline"
+          onClick={() => setDialog({ kind: 'createRoot' })}
+          className="mx-auto w-1/2 min-w-40"
+        >
+          <Plus className="mr-1 h-4 w-4" /> Новая карта
+        </Button>
+      )}
 
       {dialog && (
         <MapDialogs
@@ -196,11 +197,10 @@ export default function MapsManager({ open, onOpenChange }: { open: boolean; onO
           materials={materials}
           stats={stats}
           onClose={() => setDialog(null)}
-          onEnter={enter}
           afterDelete={afterDelete}
         />
       )}
-    </>
+    </div>
   );
 }
 
@@ -210,14 +210,12 @@ function MapDialogs({
   materials,
   stats,
   onClose,
-  onEnter,
   afterDelete,
 }: {
   dialog: NonNullable<DialogState>;
   materials: Material[];
   stats: Map<string, { subtreeAtoms: number; subtreeMaps: number }>;
   onClose: () => void;
-  onEnter: (id: string) => void;
   afterDelete: (deletedIds: string[]) => Promise<void>;
 }) {
   const [name, setName] = useState('');
@@ -434,3 +432,4 @@ function MapDialogs({
     </Dialog>
   );
 }
+

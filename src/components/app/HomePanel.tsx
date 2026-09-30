@@ -18,7 +18,6 @@ import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useMapStats } from '@/hooks/useMapStats';
 import { childrenOf, getPathToRoot } from '@/lib/maps';
-import MapsManager from '@/components/app/MapsManager';
 import MathText from '@/components/MathText';
 import { getMeta, setMeta } from '@/lib/db';
 import { useEffect, useMemo, useState } from 'react';
@@ -32,7 +31,6 @@ export default function HomePanel() {
   const data = useMaterialData(activeMaterialId);
   const { ready: statsReady, materials, stats } = useMapStats();
   const [lastNodeId, setLastNodeId] = useState<string | null>(null);
-  const [managerOpen, setManagerOpen] = useState(false);
 
   useEffect(() => {
     void getMeta('lastNodeId').then(setLastNodeId);
@@ -76,7 +74,7 @@ export default function HomePanel() {
               {mastered} из {total} идей освоено · {percent}%
             </p>
           </div>
-          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setManagerOpen(true)}>
+          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setActiveTab('maps')}>
             <FolderTree className="mr-1 h-4 w-4" /> Карты
           </Button>
         </div>
@@ -225,8 +223,6 @@ export default function HomePanel() {
           })}
         </div>
       </section>
-
-      <MapsManager open={managerOpen} onOpenChange={setManagerOpen} />
     </div>
   );
 }

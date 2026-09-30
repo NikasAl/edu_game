@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -17,7 +17,6 @@ import { ChevronRight, FolderTree, Lock, Map as MapIcon, TriangleAlert } from 'l
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import MapsManager from '@/components/app/MapsManager';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useMapStats } from '@/hooks/useMapStats';
@@ -129,7 +128,6 @@ export default function MapPanel() {
   const openNode = useAppStore((s) => s.openNode);
   const data = useMaterialData(activeMaterialId);
   const { ready: statsReady, materials, stats } = useMapStats();
-  const [managerOpen, setManagerOpen] = useState(false);
   const rfRef = useRef<ReactFlowInstance | null>(null);
 
   const path = useMemo(
@@ -254,7 +252,7 @@ export default function MapPanel() {
           <h1 className="min-w-0 truncate text-lg font-semibold">
             {current?.title ?? 'Карта знаний'}
           </h1>
-          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setManagerOpen(true)}>
+          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setActiveTab('maps')}>
             <FolderTree className="mr-1 h-4 w-4" /> Карты
           </Button>
         </div>
@@ -330,7 +328,6 @@ export default function MapPanel() {
         <span className="flex items-center gap-1"><MapIcon className="h-3 w-3 text-violet-300" /> вход в карту</span>
       </div>
 
-      <MapsManager open={managerOpen} onOpenChange={setManagerOpen} />
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { useAppStore } from '@/store/useAppStore';
 import BottomNav from '@/components/app/BottomNav';
 import HomePanel from '@/components/app/HomePanel';
 import MapPanel from '@/components/app/MapPanel';
+import MapsPanel from '@/components/app/MapsPanel';
 import ImportPanel from '@/components/app/ImportPanel';
 import SettingsPanel from '@/components/app/SettingsPanel';
 import NodeView from '@/components/app/NodeView';
@@ -35,6 +36,7 @@ export default function Home() {
       <main className="flex-1 min-h-0 overflow-y-auto mx-auto w-full max-w-lg px-4 pt-4 pb-24 thin-scroll">
         {activeTab === 'home' && <HomePanel />}
         {activeTab === 'map' && <MapPanel />}
+        {activeTab === 'maps' && <MapsPanel />}
         {activeTab === 'import' && <ImportPanel />}
         {activeTab === 'settings' && <SettingsPanel />}
       </main>
