@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowRight,
@@ -12,6 +12,7 @@ import {
   Loader2,
   Map as MapIcon,
   Save,
+  ScanText,
   Sparkles,
   TriangleAlert,
   Type,
@@ -24,21 +25,40 @@ import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { db } from '@/lib/db';
+import { db, getMeta } from '@/lib/db';
 import { useAppStore } from '@/store/useAppStore';
-import { ingestSplitIntoIdeas, genTasksForAtom, generatedToTask, validateIngest } from '@/lib/llm-ops';
+import {
+  INGEST_DETAIL_META,
+  genTasksForAtom,
+  generatedToTask,
+  ingestSplitIntoIdeasChunked,
+  ocrTextbookPage,
+  validateIngest,
+  type IngestDetail,
+} from '@/lib/llm-ops';
 import { hasCycle } from '@/lib/progress';
 import { normalizeText } from '@/lib/safeMath';
 import { getPathToRoot, nextOrderIndex } from '@/lib/maps';
-import { extractFromPdf, extractFromUrl, type ExtractedSection } from '@/lib/extract';
-import type { EdgeKind, IdeaEdge, IdeaNode, Material, Region, Task } from '@/lib/types';
+import {
+  extractFromPdf,
+  extractFromUrl,
+  openPdf,
+  pdfPageSpans,
+  renderPdfPageToDataUrl,
+  type ExtractedSection,
+  type OpenedPdf,
+} from '@/lib/extract';
+import type { EdgeKind, IdeaEdge, IdeaNode, LLMProvider, Material, Region, Task } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 
-type Phase = 'input' | 'extract' | 'parsing' | 'review' | 'tasks';
+type Phase = 'input' | 'extract' | 'pdfOcr' | 'parsing' | 'review' | 'tasks';
 type SourceMode = 'paste' | 'url' | 'pdf';
 
-/** За один раз в анализ попадает не больше этого числа знаков (см. llm-ops) */
-const ANALYZE_LIMIT = 24000;
+/** Диапазон страниц PDF для OCR-режима */
+type OcrSpan = { id: string; title: string; from: number; to: number };
+
+/** Столько атомов показывается в ревью и сохраняется (остальные отбрасываются) */
+const MAX_ATOMS = 60;
 
 export default function ImportPanel() {
   const providers = useAppStore((s) => s.providers);
@@ -56,12 +76,38 @@ export default function ImportPanel() {
   const [progressMsg, setProgressMsg] = useState('');
   const [progressVal, setProgressVal] = useState(0);
 
+  // детализация выделения идей (размер фрагментов при анализе)
+  const [detail, setDetail] = useState<IngestDetail>('normal');
+
   // источники текста
   const [sourceMode, setSourceMode] = useState<SourceMode>('paste');
   const [urlValue, setUrlValue] = useState('');
   const [urlBusy, setUrlBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
+
+  // LLM OCR для PDF (сканы / сломанный текстовый слой)
+  const [pdfOcrMode, setPdfOcrMode] = useState(false);
+  const [ocrSpans, setOcrSpans] = useState<OcrSpan[]>([]);
+  const [ocrSelectedIds, setOcrSelectedIds] = useState<Set<string>>(new Set());
+  const [ocrNumPages, setOcrNumPages] = useState(0);
+  const [ocrSource, setOcrSource] = useState('');
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const pdfDocRef = useRef<OpenedPdf | null>(null);
+  const ocrCancelRef = useRef(false);
+
+  // OCR-провайдер — тот же, что и для «OCR с фото» (Настройки → OCR с фото)
+  const [ocrProviderId, setOcrProviderId] = useState('');
+  const [ocrModel, setOcrModel] = useState('');
+  useEffect(() => {
+    void getMeta('ocrProviderId').then((v) => v && setOcrProviderId(v));
+    void getMeta('ocrModel').then((v) => v && setOcrModel(v));
+  }, []);
+  const ocrProvider: LLMProvider | null = useMemo(() => {
+    const base = (ocrProviderId && providers.find((p) => p.id === ocrProviderId)) || activeProvider;
+    if (!base) return null;
+    return ocrModel.trim() ? { ...base, model: ocrModel.trim() } : base;
+  }, [ocrProviderId, ocrModel, providers, activeProvider]);
 
   // фаза выбора секций (URL/PDF)
   const [extractTitle, setExtractTitle] = useState('');
@@ -92,7 +138,20 @@ export default function ImportPanel() {
     setProgressMsg('Разбираю текст на атомы идей…');
     setProgressVal(10);
     try {
-      const result = await ingestSplitIntoIdeas(activeProvider, ingestTitle.trim(), ingestSourceText.trim());
+      const result = await ingestSplitIntoIdeasChunked(
+        activeProvider,
+        ingestTitle.trim(),
+        ingestSourceText.trim(),
+        detail,
+        (done, total) => {
+          setProgressMsg(
+            total > 1
+              ? `Разбираю на атомы: фрагмент ${Math.min(done + 1, total)} из ${total}…`
+              : 'Разбираю текст на атомы идей…'
+          );
+          setProgressVal(10 + Math.round((Math.min(done, total) / total) * 30));
+        }
+      );
       setProgressVal(45);
       const check = validateIngest(result);
       if (!check.ok) throw new Error(check.message);
@@ -140,15 +199,118 @@ export default function ImportPanel() {
 
   const runPdf = async (file: File) => {
     setPdfBusy(true);
-    setProgressMsg('Читаю PDF…');
     try {
       const buf = await file.arrayBuffer();
-      const res = await extractFromPdf(buf, file.name, setProgressMsg);
-      openExtract(res, file.name);
+      if (pdfOcrMode) {
+        // LLM OCR: открыть документ, показать диапазоны страниц для выбора
+        setProgressMsg('Открываю PDF…');
+        const opened = await openPdf(buf);
+        pdfDocRef.current = opened;
+        const info = await pdfPageSpans(opened.doc, file.name);
+        setOcrSource(file.name);
+        setOcrNumPages(info.numPages);
+        setOcrSpans(info.spans.map((s, i) => ({ ...s, id: `sp${i}` })));
+        setExtractTitle(info.title);
+        // маленькие документы отмечаем целиком, большие — выбор за пользователем
+        setOcrSelectedIds(new Set(info.numPages <= 6 ? info.spans.map((_, i) => `sp${i}`) : []));
+        setPhase('pdfOcr');
+      } else {
+        setProgressMsg('Читаю PDF…');
+        const res = await extractFromPdf(buf, file.name, setProgressMsg);
+        openExtract(res, file.name);
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось разобрать PDF');
     } finally {
       setPdfBusy(false);
+    }
+  };
+
+  const closePdfDoc = () => {
+    void pdfDocRef.current?.destroy();
+    pdfDocRef.current = null;
+  };
+
+  const toggleOcrSpan = (id: string) => {
+    setOcrSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const ocrSelected = ocrSpans.filter((s) => ocrSelectedIds.has(s.id));
+  const ocrPageCount = ocrSelected.reduce((n, s) => n + (s.to - s.from + 1), 0);
+
+  const runPdfOcr = async () => {
+    const opened = pdfDocRef.current;
+    if (!opened) return;
+    const doc = opened.doc;
+    if (!ocrProvider) {
+      toast.error('Нужен LLM-провайдер с vision-моделью — настрой его в «Настройки → OCR с фото»');
+      return;
+    }
+    if (ocrSelected.length === 0) {
+      toast.error('Отметь хотя бы один диапазон страниц');
+      return;
+    }
+    if (ocrPageCount > 40) {
+      toast.warning(`${ocrPageCount} страниц — распознавание займёт много времени и токенов`);
+    }
+    setOcrBusy(true);
+    setProgressVal(0);
+    ocrCancelRef.current = false;
+    const sections: ExtractedSection[] = [];
+    try {
+      let done = 0;
+      let cancelled = false;
+      for (const sp of ocrSelected) {
+        if (cancelled) break;
+        const pages: string[] = [];
+        for (let p = sp.from; p <= Math.min(sp.to, doc.numPages); p++) {
+          if (ocrCancelRef.current) {
+            cancelled = true;
+            break;
+          }
+          setProgressMsg(`OCR: страница ${p} (${done + 1}/${ocrPageCount})…`);
+          try {
+            const dataUrl = await renderPdfPageToDataUrl(doc, p);
+            pages.push(await ocrTextbookPage(ocrProvider, dataUrl));
+          } catch (e) {
+            pages.push(`[страница ${p} не распознана: ${e instanceof Error ? e.message : 'ошибка'}]`);
+          }
+          done++;
+          setProgressVal(Math.round((done / ocrPageCount) * 100));
+        }
+        const text = pages.join('\n\n').trim();
+        if (text.length > 0) {
+          sections.push({
+            id: `sec${sections.length}`,
+            title: sp.title || `Раздел ${sections.length + 1}`,
+            text,
+          });
+        }
+      }
+      if (sections.length === 0) {
+        toast.error('Ни одна страница не распознана');
+        setPhase('input');
+      } else {
+        openExtract(
+          {
+            title: extractTitle,
+            sections,
+            warning: cancelled
+              ? 'Распознавание прервано — применены уже распознанные разделы'
+              : undefined,
+          },
+          `${ocrSource} · LLM OCR`
+        );
+        setPhase('extract');
+      }
+    } finally {
+      setOcrBusy(false);
+      closePdfDoc();
     }
   };
 
@@ -197,7 +359,7 @@ export default function ImportPanel() {
       }));
 
       // Узлы
-      const nodes: IdeaNode[] = ingestResult.atoms.slice(0, 15).map((a, i) => ({
+      const nodes: IdeaNode[] = ingestResult.atoms.slice(0, MAX_ATOMS).map((a, i) => ({
         id: uuid(),
         materialId,
         regionId: regions[Math.min(a.regionIndex, regions.length - 1)].id,
@@ -307,6 +469,136 @@ export default function ImportPanel() {
         </div>
       )}
 
+      {/* ============ Фаза выбора страниц для LLM OCR ============ */}
+      {phase === 'pdfOcr' && (
+        <Card>
+          <CardContent className="flex flex-col gap-3 p-4">
+            <div>
+              <p className="text-xs text-muted-foreground">
+                Файл: {ocrSource} · {ocrNumPages} стр.
+              </p>
+              <p className="mt-2 text-sm font-medium">Какие страницы распознать через LLM OCR?</p>
+            </div>
+
+            {!ocrProvider && (
+              <div className="flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-300">
+                <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                <p>
+                  Для OCR нужна vision-модель. Подключи провайдера и выбери модель в «Настройки →
+                  OCR с фото».
+                </p>
+              </div>
+            )}
+            {ocrProvider && (
+              <p className="text-[11px] text-muted-foreground">
+                Распознавать будет:{' '}
+                <span className="font-medium text-foreground">
+                  {ocrProvider.name} · {ocrProvider.model}
+                </span>{' '}
+                (меняется в «Настройки → OCR с фото»)
+              </p>
+            )}
+
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2"
+                  onClick={() => setOcrSelectedIds(new Set(ocrSpans.map((s) => s.id)))}
+                >
+                  Выбрать все
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2"
+                  onClick={() => setOcrSelectedIds(new Set())}
+                >
+                  Снять все
+                </Button>
+              </div>
+              <Badge variant={ocrPageCount > 40 ? 'destructive' : 'secondary'}>
+                {ocrPageCount} стр.
+              </Badge>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              {ocrSpans.map((s) => {
+                const selected = ocrSelectedIds.has(s.id);
+                return (
+                  <div
+                    key={s.id}
+                    className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 transition-colors ${
+                      selected ? 'border-primary/40 bg-primary/5' : 'border-border bg-card'
+                    }`}
+                  >
+                    <button
+                      onClick={() => toggleOcrSpan(s.id)}
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
+                        selected
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-muted-foreground/40'
+                      }`}
+                      aria-label={selected ? 'Снять отметку' : 'Отметить страницы'}
+                      aria-pressed={selected}
+                    >
+                      {selected && <Check className="h-3.5 w-3.5" />}
+                    </button>
+                    <span className={`min-w-0 flex-1 truncate text-sm ${selected ? '' : 'text-muted-foreground'}`}>
+                      {s.title}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                      {s.from === s.to ? `стр. ${s.from}` : `стр. ${s.from}–${s.to}`}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Каждая страница — отдельный vision-запрос: формулы переводятся в LaTeX, колонтитулы
+              отбрасываются. Медленнее текстового слоя, зато работает для сканов и учебников со
+              сложными формулами.
+            </p>
+
+            {ocrBusy ? (
+              <div className="flex flex-col gap-2 rounded-xl border border-primary/30 bg-primary/5 p-3">
+                <p className="flex items-center gap-2 text-sm text-primary">
+                  <Loader2 className="h-4 w-4 animate-spin" /> {progressMsg}
+                </p>
+                <Progress value={progressVal} className="h-1.5" />
+                <Button variant="outline" size="sm" onClick={() => (ocrCancelRef.current = true)}>
+                  Прервать и сохранить распознанное
+                </Button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => {
+                    setPhase('input');
+                    setOcrSpans([]);
+                    setOcrSelectedIds(new Set());
+                    closePdfDoc();
+                  }}
+                >
+                  Отмена
+                </Button>
+                <Button
+                  className="flex-1"
+                  onClick={() => void runPdfOcr()}
+                  disabled={ocrSelected.length === 0 || !ocrProvider}
+                >
+                  <ScanText className="mr-1 h-4 w-4" /> Распознать ({ocrPageCount} стр.)
+                </Button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* ============ Фаза выбора секций извлечения ============ */}
       {phase === 'extract' && (
         <Card>
@@ -342,15 +634,16 @@ export default function ImportPanel() {
                   Снять все
                 </Button>
               </div>
-              <Badge variant={selectedChars > ANALYZE_LIMIT ? 'destructive' : 'secondary'}>
+              <Badge variant="secondary">
                 {selectedSections.length}/{sections.length} · {selectedChars.toLocaleString('ru-RU')} знаков
               </Badge>
             </div>
 
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Отметь разделы, из которых собрать материал — по каждому доступен предпросмотр. В анализ за один раз
-              попадает до ~{ANALYZE_LIMIT.toLocaleString('ru-RU')} знаков: большой документ лучше импортировать
-              несколькими картами.
+              Отметь разделы, из которых собрать материал — по каждому доступен предпросмотр.
+              Длинный текст при анализе делится на фрагменты по выбранной детализации
+              (~{INGEST_DETAIL_META[detail].chunkChars.toLocaleString('ru-RU')} знаков сейчас), так что
+              большие разделы применять можно — модель пройдёт их по частям.
             </p>
 
             <div className="flex flex-col gap-1">
@@ -494,6 +787,33 @@ export default function ImportPanel() {
                     e.target.value = '';
                   }}
                 />
+                <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted/60 p-1">
+                  <button
+                    onClick={() => setPdfOcrMode(false)}
+                    disabled={pdfBusy}
+                    className={`flex min-h-[34px] items-center justify-center gap-1.5 rounded-md px-2 text-xs transition-colors ${
+                      !pdfOcrMode
+                        ? 'bg-card font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    aria-pressed={!pdfOcrMode}
+                  >
+                    Текстовый слой
+                  </button>
+                  <button
+                    onClick={() => setPdfOcrMode(true)}
+                    disabled={pdfBusy}
+                    className={`flex min-h-[34px] items-center justify-center gap-1.5 rounded-md px-2 text-xs transition-colors ${
+                      pdfOcrMode
+                        ? 'bg-card font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    aria-pressed={pdfOcrMode}
+                  >
+                    <ScanText className="h-4 w-4 shrink-0" />
+                    LLM OCR
+                  </button>
+                </div>
                 <Button className="w-full" onClick={() => pdfInputRef.current?.click()} disabled={pdfBusy}>
                   {pdfBusy ? (
                     <>
@@ -506,8 +826,9 @@ export default function ImportPanel() {
                   )}
                 </Button>
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  Подходят PDF с текстовым слоем. Если в файле есть оглавление — разделы создадутся по его пунктам,
-                  иначе по страницам. Сканы страниц без текста не поддерживаются.
+                  {pdfOcrMode
+                    ? 'Страницы распознаёт vision-модель (как «OCR с фото»): формулы переводятся в LaTeX. Для сканов и учебников со сломанным текстовым слоем. После выбора файла отметь нужные страницы.'
+                    : 'Подходят PDF с текстовым слоем. Оглавление даст разделы по его пунктам, иначе — по страницам. Если вместо формул в тексте мусор — переключись на «LLM OCR».'}
                 </p>
               </div>
             )}
@@ -567,6 +888,30 @@ export default function ImportPanel() {
                 className="resize-none"
                 disabled={phase !== 'input'}
               />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                Детализация выделения идей
+              </label>
+              <Select
+                value={detail}
+                onValueChange={(v) => setDetail(v as IngestDetail)}
+                disabled={phase !== 'input'}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="compact">Крупно — только основные идеи</SelectItem>
+                  <SelectItem value="normal">Обычный — сбалансированный охват</SelectItem>
+                  <SelectItem value="detailed">Подробно — максимум идей</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                {INGEST_DETAIL_META[detail].hint}. Длинный текст делится на фрагменты, идеи
+                выделяются по каждому и объединяются — так модель не пропускает важное на
+                больших материалах.
+              </p>
             </div>
             {phase === 'input' ? (
               <Button onClick={startParse} disabled={!activeProvider}>
@@ -632,7 +977,13 @@ function ReviewList({ onBack, onSave }: { onBack: () => void; onSave: () => void
           Ревью: {ingestResult.atoms.length} атомов, {ingestResult.regions.length} регионов
         </h2>
       </div>
-      {ingestResult.atoms.slice(0, 15).map((a, i) => (
+      {ingestResult.atoms.length > MAX_ATOMS && (
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-300">
+          Показаны первые {MAX_ATOMS} из {ingestResult.atoms.length} атомов — при сохранении
+          остальные будут отброшены. Лучше импортируй материал частями или снизь детализацию.
+        </p>
+      )}
+      {ingestResult.atoms.slice(0, MAX_ATOMS).map((a, i) => (
         <Card key={i}>
           <CardContent className="flex flex-col gap-2 p-4">
             <Input value={a.title} onChange={(e) => updateAtom(i, { title: e.target.value })} className="font-medium" />

@@ -52,13 +52,17 @@ const INGEST_PROMPT = `Разбери учебный материал и выд�
 export async function ingestSplitIntoIdeas(
   provider: LLMProvider,
   materialTitle: string,
-  sourceText: string
+  sourceText: string,
+  part?: { part: number; total: number }
 ): Promise<IngestResult> {
+  const partNote = part
+    ? `Это часть ${part.part} из ${part.total} большого материала. Анализируй ТОЛЬКО этот фрагмент — не пытайся покрыть весь материал. Идеи соседних частей будут добавлены из других запросов; дубли допустимы, их отфильтруют позже.`
+    : '';
   const messages: LLMMessage[] = [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: `${INGEST_PROMPT}\n\nНазвание материала: «${materialTitle}»\n\nМАТЕРИАЛ:\n${sourceText.slice(0, 24000)}`,
+      content: `${INGEST_PROMPT}${partNote ? `\n\n${partNote}` : ''}\n\nНазвание материала: «${materialTitle}»\n\nМАТЕРИАЛ:\n${sourceText.slice(0, 24000)}`,
     },
   ];
   const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 50000, op: 'ingest' });
@@ -67,6 +71,137 @@ export async function ingestSplitIntoIdeas(
     throw new Error('LLM не вернул ни одного атома');
   }
   return parsed;
+}
+
+// ============ 1б. Ингест с детализацией: длинный текст → фрагменты ============
+
+/**
+ * На длинных текстах модель за один запрос находит лишь ~десяток самых заметных
+ * идей — сколько бы их ни было в материале. Поэтому текст делится на фрагменты
+ * (размер зависит от уровня детализации), идеи выделяются по каждому фрагменту
+ * отдельно и объединяются с дедупликацией по названию.
+ */
+export type IngestDetail = 'compact' | 'normal' | 'detailed';
+
+export const INGEST_DETAIL_META: Record<
+  IngestDetail,
+  { label: string; chunkChars: number; hint: string }
+> = {
+  compact: {
+    label: 'Крупно',
+    chunkChars: 24000,
+    hint: 'Фрагменты по ~24 000 знаков: только основные идеи, минимум запросов',
+  },
+  normal: {
+    label: 'Обычный',
+    chunkChars: 10000,
+    hint: 'Фрагменты по ~10 000 знаков: сбалансированный охват',
+  },
+  detailed: {
+    label: 'Подробно',
+    chunkChars: 5000,
+    hint: 'Фрагменты по ~5 000 знаков: заметно больше идей, но больше запросов к модели',
+  },
+};
+
+/** Предохранитель: больше фрагментов за один раз не берём (40 × 24k = ~1 МБ текста) */
+export const MAX_INGEST_CHUNKS = 40;
+
+/** Разбить текст на фрагменты по границам абзацев/строк с небольшим перекрытием */
+export function splitIntoChunks(text: string, limit: number, overlap = 350): string[] {
+  if (text.length <= limit) return [text];
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length && chunks.length < MAX_INGEST_CHUNKS + 50) {
+    let end = Math.min(start + limit, text.length);
+    if (end < text.length) {
+      // режем по ближайшей границе во второй половине фрагмента
+      const windowStart = start + Math.floor(limit * 0.5);
+      const para = text.lastIndexOf('\n\n', end);
+      if (para > windowStart) {
+        end = para;
+      } else {
+        const nl = text.lastIndexOf('\n', end);
+        if (nl > windowStart) {
+          end = nl;
+        } else {
+          const dot = text.lastIndexOf('. ', end);
+          if (dot > windowStart) end = dot + 1;
+        }
+      }
+    }
+    const chunk = text.slice(start, end).trim();
+    if (chunk.length > 0) chunks.push(chunk);
+    if (end >= text.length) break;
+    start = Math.max(end - overlap, start + Math.floor(limit * 0.4)); // гарантия прогресса
+  }
+  return chunks;
+}
+
+/**
+ * Ингест с учётом детализации: короткий текст — один запрос, длинный —
+ * по фрагментам с объединением результатов (регионы сливаются по названию,
+ * атомы дедуплицируются по нормализованному названию).
+ */
+export async function ingestSplitIntoIdeasChunked(
+  provider: LLMProvider,
+  materialTitle: string,
+  sourceText: string,
+  detail: IngestDetail,
+  onProgress?: (done: number, total: number) => void
+): Promise<IngestResult> {
+  const chunkChars = INGEST_DETAIL_META[detail].chunkChars;
+  const chunks = splitIntoChunks(sourceText.trim(), chunkChars);
+  if (chunks.length > MAX_INGEST_CHUNKS) {
+    throw new Error(
+      `Текст слишком большой: ${chunks.length} фрагментов (максимум ${MAX_INGEST_CHUNKS}). Уменьши детализацию или импортируй материал частями`
+    );
+  }
+  if (chunks.length === 1) {
+    onProgress?.(0, 1);
+    const result = await ingestSplitIntoIdeas(provider, materialTitle, chunks[0]);
+    onProgress?.(1, 1);
+    return result;
+  }
+
+  const merged: IngestResult = { regions: [], atoms: [] };
+  const regionByKey = new Map<string, number>();
+  const MAX_REGIONS = 8;
+  const seenAtoms = new Set<string>();
+
+  for (let i = 0; i < chunks.length; i++) {
+    onProgress?.(i, chunks.length);
+    const part = await ingestSplitIntoIdeas(provider, materialTitle, chunks[i], {
+      part: i + 1,
+      total: chunks.length,
+    });
+    // регионы: слияние по нормализованному названию, сверху ограничение
+    const partRegionIdx: number[] = [];
+    for (const r of part.regions) {
+      const key = normalizeText(r.title);
+      let idx = regionByKey.get(key);
+      if (idx === undefined) {
+        if (merged.regions.length >= MAX_REGIONS) {
+          idx = merged.regions.length - 1; // переполнение — складываем в последний регион
+        } else {
+          idx = merged.regions.length;
+          merged.regions.push(r);
+          regionByKey.set(key, idx);
+        }
+      }
+      partRegionIdx.push(idx);
+    }
+    // атомы: дедупликация по названию (стыки фрагментов дают повторы)
+    for (const a of part.atoms) {
+      const key = normalizeText(a.title);
+      if (seenAtoms.has(key)) continue;
+      seenAtoms.add(key);
+      const regionIdx = partRegionIdx[a.regionIndex] ?? 0;
+      merged.atoms.push({ ...a, regionIndex: regionIdx });
+    }
+  }
+  onProgress?.(chunks.length, chunks.length);
+  return merged;
 }
 
 // ============ 2. Генерация задач для атома ============
@@ -326,6 +461,17 @@ const OCR_PROMPT_FULL = `Ты — точная OCR-система. На изоб
 
 const OCR_PROMPT_SHORT = `На изображении — рукописное решение задачи. Верни ТОЛЬКО итоговый ответ (число, выражение или слово) — как он записан в конце решения. Без пояснений. Если итогового ответа нет — верни самую релевантную строку с результатом.`;
 
+const OCR_PAGE_PROMPT = `Ты — точная OCR-система для учебников. На изображении — страница учебного материала. Перепиши ВЕСЬ содержательный текст страницы:
+- сохрани структуру: заголовки разделов помечай в начале строки «## », подзаголовки — «### », остальное — обычными абзацами;
+- определения, теоремы, правила и выводы переписывай дословно;
+- ВСЕ математические формулы переведи в LaTeX: строчные — в \\( ... \\), выключные (отдельной строкой) — в \\[ ... \\]. Примеры: \\( x^2 + 2x \\), \\[ \\int_0^1 x\\,dx = \\frac{1}{2} \\];
+- таблицы записывай построчно, значения через « | »;
+- верхние/нижние колонтитулы, номера страниц и повторяющуюся навигацию НЕ переноси;
+- рисунки помечай одной строкой: [Рисунок: краткое описание];
+- неразборчивое место помечай как [неразборчиво];
+- не решай задачи и условия из страницы, не добавляй ничего от себя.
+Верни ТОЛЬКО распознанный текст, без комментариев и без markdown-заборов.`;
+
 /**
  * Распознать текст с фотографии решения (OpenAI-совместимый vision-запрос).
  * Требуется модель, принимающая изображения (gpt-4o-mini, gemini-flash, qwen-vl и т.п.).
@@ -349,6 +495,35 @@ export async function ocrHandwritten(
     temperature: 0,
     maxTokens: 4000,
     op: 'ocr',
+    jsonMode: false,
+  });
+  return res.content.trim();
+}
+
+/**
+ * Распознать страницу учебника (OpenAI-совместимый vision-запрос).
+ * В отличие от рукописного OCR здесь важна структура: заголовки, абзацы,
+ * таблицы; все формулы — в LaTeX. Текстовый слой PDF часто мусорный,
+ * поэтому страница отдаётся моделью картинкой (см. extract.renderPdfPageToDataUrl).
+ */
+export async function ocrTextbookPage(
+  provider: LLMProvider,
+  imageDataUrl: string
+): Promise<string> {
+  const base64 = imageDataUrl.includes(',') ? imageDataUrl.split(',')[1] : imageDataUrl;
+  const messages: LLMMessage[] = [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: OCR_PAGE_PROMPT },
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } },
+      ],
+    },
+  ];
+  const res = await callLLM(provider, messages, {
+    temperature: 0,
+    maxTokens: 8000,
+    op: 'ocr_page',
     jsonMode: false,
   });
   return res.content.trim();

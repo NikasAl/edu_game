@@ -13,9 +13,8 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { ChevronRight, FolderTree, Lock, Map as MapIcon, TriangleAlert } from 'lucide-react';
+import { ChevronRight, Lock, Map as MapIcon, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
-import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
@@ -126,6 +125,7 @@ export default function MapPanel() {
   const setActiveMaterialId = useAppStore((s) => s.setActiveMaterialId);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const openNode = useAppStore((s) => s.openNode);
+  const theme = useAppStore((s) => s.theme);
   const data = useMaterialData(activeMaterialId);
   const { ready: statsReady, materials, stats } = useMapStats();
   const rfRef = useRef<ReactFlowInstance | null>(null);
@@ -252,9 +252,6 @@ export default function MapPanel() {
           <h1 className="min-w-0 truncate text-lg font-semibold">
             {current?.title ?? 'Карта знаний'}
           </h1>
-          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setActiveTab('maps')}>
-            <FolderTree className="mr-1 h-4 w-4" /> Карты
-          </Button>
         </div>
         {/* Хлебные крошки: путь от корневой карты */}
         {ancestors.length > 0 && (
@@ -298,6 +295,7 @@ export default function MapPanel() {
         ) : (
           <ReactFlow
             key={activeMaterialId ?? 'none'}
+            colorMode={theme}
             nodes={rfNodes}
             edges={rfEdges}
             nodeTypes={nodeTypes}

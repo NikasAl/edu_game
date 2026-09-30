@@ -8,7 +8,6 @@ import {
   ArrowRight,
   BookOpen,
   ChevronRight,
-  FolderTree,
   Map as MapIcon,
   Sparkles,
   TriangleAlert,
@@ -74,9 +73,6 @@ export default function HomePanel() {
               {mastered} из {total} идей освоено · {percent}%
             </p>
           </div>
-          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setActiveTab('maps')}>
-            <FolderTree className="mr-1 h-4 w-4" /> Карты
-          </Button>
         </div>
         {ancestors.length > 0 && (
           <nav className="flex flex-wrap items-center gap-0.5 text-xs text-muted-foreground" aria-label="Путь по картам">

@@ -6,6 +6,10 @@
  *    автоматический фолбэк через reader-прокси r.jina.ai (возвращает markdown).
  *  — PDF с текстовым слоем: pdf.js (pdfjs-dist), разбивка по пунктам оглавления
  *    (outline), а без оглавления — по страницам (по 1 или 5).
+ *  — PDF через LLM OCR (для сканов и книг с формулами): текстовый слой часто
+ *    бесполезен (формулы превращаются в мусор, кодировка ломается), поэтому
+ *    страницы можно распознать vision-моделью: renderPdfPageToDataUrl отдаёт
+ *    страницу картинкой, а ocrTextbookPage (llm-ops) переводит её в текст с LaTeX.
  *
  * Результат — плоский список секций: пользователь отмечает нужные, смотрит
  * предпросмотр и применяет выбранный текст к анализу на идеи.
@@ -203,41 +207,41 @@ interface OutlineItem {
   items?: OutlineItem[];
 }
 
-export async function extractFromPdf(
-  data: ArrayBuffer,
-  fileName: string,
-  onProgress?: (msg: string) => void
-): Promise<ExtractResult> {
+export type PdfDoc = import('pdfjs-dist').PDFDocumentProxy;
+
+export interface OpenedPdf {
+  doc: PdfDoc;
+  /** Завершить работу с документом: terminate воркера и освободить память */
+  destroy: () => Promise<void>;
+}
+
+/** Открыть PDF (pdf.js): worker и cmaps настраиваются автоматически */
+export async function openPdf(data: ArrayBuffer): Promise<OpenedPdf> {
   const pdfjs = await import('pdfjs-dist');
   // worker нужен только в браузере; в Node (тесты) pdf.js грузит worker-модуль сам
   const isNode = typeof process !== 'undefined' && !!process.versions?.node;
   if (!isNode) pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
-  const doc = await pdfjs.getDocument({
+  // В pdf.js v5+ освобождение ресурсов — через loading task (у документа только cleanup)
+  const task = pdfjs.getDocument({
     data: new Uint8Array(data),
     cMapUrl: '/cmaps/',
     cMapPacked: true,
     standardFontDataUrl: '/standard_fonts/',
-  }).promise;
+  });
+  const doc = await task.promise;
+  return { doc, destroy: () => task.destroy() };
+}
 
+/** Метаданные + диапазоны страниц: по оглавлению, иначе — по страницам (по 1 или 5) */
+export async function pdfPageSpans(
+  doc: PdfDoc,
+  fileName: string
+): Promise<{ numPages: number; title: string; spans: { title: string; from: number; to: number }[] }> {
   const meta = await doc.getMetadata().catch(() => null);
   const metaTitle = (meta?.info as { Title?: string } | null)?.Title?.trim() ?? '';
   const title = (metaTitle || fileName.replace(/\.pdf$/i, '')).slice(0, 140);
 
-  const pageText = async (n: number): Promise<string> => {
-    const page = await doc.getPage(n);
-    const tc = await page.getTextContent();
-    let out = '';
-    for (const item of tc.items) {
-      if ('str' in item) {
-        out += item.str;
-        out += item.hasEOL ? '\n' : ' ';
-      }
-    }
-    return cleanText(out);
-  };
-
-  // Диапазоны страниц: по оглавлению, иначе — по страницам
   const spans: { title: string; from: number; to: number }[] = [];
   const outline = (await doc.getOutline().catch(() => null)) as OutlineItem[] | null;
   if (outline && outline.length > 0) {
@@ -275,6 +279,53 @@ export async function extractFromPdf(
       });
     }
   }
+  return { numPages: doc.numPages, title, spans };
+}
+
+/** Отрендерить страницу PDF в JPEG data URL (для vision-OCR) */
+export async function renderPdfPageToDataUrl(
+  doc: PdfDoc,
+  pageNumber: number,
+  maxWidth = 1400
+): Promise<string> {
+  const page = await doc.getPage(pageNumber);
+  const base = page.getViewport({ scale: 1 });
+  const scale = Math.min(2.5, Math.max(1, maxWidth / base.width));
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    // PDF может быть с прозрачным фоном — заливаем белым, иначе JPEG даст чёрный фон
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  await page.render({ canvas, viewport }).promise;
+  return canvas.toDataURL('image/jpeg', 0.85);
+}
+
+export async function extractFromPdf(
+  data: ArrayBuffer,
+  fileName: string,
+  onProgress?: (msg: string) => void
+): Promise<ExtractResult> {
+  const handle = await openPdf(data);
+  const doc = handle.doc;
+  const { title, spans } = await pdfPageSpans(doc, fileName);
+
+  const pageText = async (n: number): Promise<string> => {
+    const page = await doc.getPage(n);
+    const tc = await page.getTextContent();
+    let out = '';
+    for (const item of tc.items) {
+      if ('str' in item) {
+        out += item.str;
+        out += item.hasEOL ? '\n' : ' ';
+      }
+    }
+    return cleanText(out);
+  };
 
   const sections: ExtractedSection[] = [];
   for (let i = 0; i < spans.length; i++) {
@@ -294,12 +345,13 @@ export async function extractFromPdf(
   }
 
   if (sections.length === 0 || sections.reduce((n, s) => n + s.text.length, 0) < MIN_TOTAL_CHARS) {
+    void handle.destroy();
     throw new Error(
-      'В PDF не найден текстовый слой — похоже, это сканы страниц. Такие файлы пока не поддерживаются'
+      'В PDF не найден текстовый слой — похоже, это скан. Попробуй режим «LLM OCR» — он распознаёт страницы картинкой'
     );
   }
 
-  return {
+  const result: ExtractResult = {
     title,
     sections,
     warning:
@@ -307,6 +359,8 @@ export async function extractFromPdf(
         ? `Документ большой (${doc.numPages} стр.) — выбери нужные разделы, остальное импортируй отдельными картами`
         : undefined,
   };
+  void handle.destroy();
+  return result;
 }
 
 async function destToPage(
