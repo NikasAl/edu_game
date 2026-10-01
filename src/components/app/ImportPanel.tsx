@@ -104,6 +104,8 @@ export default function ImportPanel() {
   const [ocrSpans, setOcrSpans] = useState<OcrSpan[]>([]);
   // выбор ПОСТРАНИЧНЫЙ: пользователь может взять отдельные страницы из группы
   const [ocrSelectedPages, setOcrSelectedPages] = useState<Set<number>>(new Set());
+  // развёрнутые группы миниатюр (по умолчанию все свёрнуты — большие книги листаются по оглавлению)
+  const [ocrExpandedGroups, setOcrExpandedGroups] = useState<Set<string>>(new Set());
   // увеличенный предпросмотр одной страницы (диалог)
   const [previewPage, setPreviewPage] = useState<number | null>(null);
   const [ocrNumPages, setOcrNumPages] = useState(0);
@@ -238,6 +240,7 @@ export default function ImportPanel() {
         setOcrSource(file.name);
         setOcrNumPages(info.numPages);
         setOcrSpans(info.spans.map((s, i) => ({ ...s, id: `sp${i}` })));
+        setOcrExpandedGroups(new Set());
         setExtractTitle(info.title);
         // маленькие документы отмечаем целиком, большие — выбор за пользователем
         setOcrSelectedPages(
@@ -281,6 +284,16 @@ export default function ImportPanel() {
         if (allSelected) next.delete(p);
         else next.add(p);
       }
+      return next;
+    });
+  };
+
+  /** Развернуть/свернуть миниатюры группы */
+  const toggleOcrGroupExpanded = (key: string) => {
+    setOcrExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
@@ -595,65 +608,93 @@ export default function ImportPanel() {
               </Badge>
             </div>
 
-            {/* Группы страниц: заголовок секции + миниатюры с постраничным выбором */}
-            <div className="flex flex-col gap-3">
+            {/* Группы страниц: по умолчанию свёрнуты в строки оглавления,
+                миниатюры разворачиваются по клику на стрелку */}
+            <div className="flex flex-col gap-1.5">
               {ocrGroups.map((g) => {
                 const groupFrom = g.pages[0];
                 const groupTo = g.pages[g.pages.length - 1];
                 const allSel = g.pages.every((p) => ocrSelectedPages.has(p));
                 const someSel = g.pages.some((p) => ocrSelectedPages.has(p));
+                const expanded = ocrExpandedGroups.has(g.key);
+                const selectedInGroup = g.pages.filter((p) => ocrSelectedPages.has(p)).length;
                 return (
-                  <div key={g.key}>
-                    {g.title && (
-                      <div className="mb-1.5 flex items-center gap-2">
-                        <button
-                          onClick={() => toggleOcrGroup(groupFrom, groupTo)}
-                          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
-                            allSel
-                              ? 'border-primary bg-primary text-primary-foreground'
-                              : someSel
-                                ? 'border-primary/60 bg-primary/20 text-primary'
-                                : 'border-muted-foreground/40'
-                          }`}
-                          aria-label={allSel ? 'Снять всю группу' : 'Отметить всю группу'}
-                          aria-pressed={allSel}
-                        >
-                          {allSel ? (
-                            <Check className="h-3.5 w-3.5" />
-                          ) : someSel ? (
-                            <Minus className="h-3.5 w-3.5" />
-                          ) : null}
-                        </button>
-                        <span className="min-w-0 flex-1 truncate text-xs font-medium">{g.title}</span>
-                        <span className="shrink-0 text-[11px] text-muted-foreground">
-                          {g.pages.length === 1
-                            ? `стр. ${groupFrom}`
-                            : `стр. ${groupFrom}–${groupTo}`}
-                        </span>
+                  <div
+                    key={g.key}
+                    className={`rounded-lg border transition-colors ${
+                      someSel ? 'border-primary/40 bg-primary/5' : 'border-border/70'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 px-2 py-1.5">
+                      <button
+                        onClick={() => toggleOcrGroupExpanded(g.key)}
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                        aria-label={expanded ? 'Свернуть миниатюры' : 'Развернуть миниатюры страниц'}
+                        aria-expanded={expanded}
+                      >
+                        {expanded ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                      </button>
+                      <button
+                        onClick={() => toggleOcrGroup(groupFrom, groupTo)}
+                        className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
+                          allSel
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : someSel
+                              ? 'border-primary/60 bg-primary/20 text-primary'
+                              : 'border-muted-foreground/40'
+                        }`}
+                        aria-label={allSel ? 'Снять всю группу' : 'Отметить всю группу'}
+                        aria-pressed={allSel}
+                      >
+                        {allSel ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : someSel ? (
+                          <Minus className="h-3.5 w-3.5" />
+                        ) : null}
+                      </button>
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                        {g.title ?? 'Страницы документа'}
+                      </span>
+                      {selectedInGroup > 0 && (
+                        <Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">
+                          {selectedInGroup}/{g.pages.length}
+                        </Badge>
+                      )}
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        {g.pages.length === 1
+                          ? `стр. ${groupFrom}`
+                          : `стр. ${groupFrom}–${groupTo}`}
+                      </span>
+                    </div>
+                    {expanded && (
+                      <div className="grid grid-cols-3 gap-2 px-2 pb-2">
+                        {g.pages.map((p) => (
+                          <PageThumb
+                            key={p}
+                            doc={ocrDoc}
+                            page={p}
+                            selected={ocrSelectedPages.has(p)}
+                            onToggle={() => toggleOcrPage(p)}
+                            onPreview={() => setPreviewPage(p)}
+                          />
+                        ))}
                       </div>
                     )}
-                    <div className="grid grid-cols-3 gap-2">
-                      {g.pages.map((p) => (
-                        <PageThumb
-                          key={p}
-                          doc={ocrDoc}
-                          page={p}
-                          selected={ocrSelectedPages.has(p)}
-                          onToggle={() => toggleOcrPage(p)}
-                          onPreview={() => setPreviewPage(p)}
-                        />
-                      ))}
-                    </div>
                   </div>
                 );
               })}
             </div>
 
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Каждая страница — отдельный vision-запрос в высоком разрешении (~2200 px по ширине):
-              формулы переводятся в LaTeX, колонтитулы отбрасываются. Нажми на глаз — увидишь
-              страницу крупно: если текст не читается даже в предпросмотре, модель его тоже не
-              разберёт. Отмечать можно отдельные страницы, не всю группу.
+              Группы страниц свёрнуты — листай оглавление и отмечай нужные разделы галочкой.
+              Чтобы выбрать отдельные страницы, разверни группу стрелкой и тапни по миниатюрам;
+              глаз открывает страницу крупно. Каждая страница — отдельный vision-запрос
+              в высоком разрешении (~2200 px): формулы переводятся в LaTeX, колонтитулы
+              отбрасываются.
             </p>
 
             {ocrBusy ? (
@@ -675,6 +716,7 @@ export default function ImportPanel() {
                     setPhase('input');
                     setOcrSpans([]);
                     setOcrSelectedPages(new Set());
+                    setOcrExpandedGroups(new Set());
                     closePdfDoc();
                   }}
                 >

@@ -223,11 +223,14 @@ export async function openPdf(data: ArrayBuffer): Promise<OpenedPdf> {
   if (!isNode) pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
   // В pdf.js v5+ освобождение ресурсов — через loading task (у документа только cleanup)
+  // wasmUrl обязателен с pdf.js v6: декодирование CCITT (факс-сканы) и JBIG2
+  // переехало в WASM-модуль jbig2.wasm; без него страницы-сканы рендерятся белыми.
   const task = pdfjs.getDocument({
     data: new Uint8Array(data),
     cMapUrl: '/cmaps/',
     cMapPacked: true,
     standardFontDataUrl: '/standard_fonts/',
+    wasmUrl: '/wasm/',
   });
   const doc = await task.promise;
   return { doc, destroy: () => task.destroy() };
