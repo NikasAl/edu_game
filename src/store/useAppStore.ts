@@ -12,6 +12,9 @@ interface AppState {
   openNodeId: string | null; // экран узла — оверлей поверх вкладок
   openNode: (id: string) => void;
   closeNode: () => void;
+  editNodeId: string | null; // редактор узла — оверлей над экраном узла
+  openNodeEditor: (id: string) => void;
+  closeNodeEditor: () => void;
   activeMaterialId: string | null;
   setActiveMaterialId: (id: string) => Promise<void>;
   /** Сбросить активную карту (когда её удалили, а других нет) */
@@ -42,10 +45,13 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   activeTab: 'home',
-  setActiveTab: (tab) => set({ activeTab: tab, openNodeId: null }),
+  setActiveTab: (tab) => set({ activeTab: tab, openNodeId: null, editNodeId: null }),
   openNodeId: null,
   openNode: (id) => set({ openNodeId: id }),
   closeNode: () => set({ openNodeId: null }),
+  editNodeId: null,
+  openNodeEditor: (id) => set({ editNodeId: id }),
+  closeNodeEditor: () => set({ editNodeId: null }),
   activeMaterialId: null,
   hydrated: false,
 

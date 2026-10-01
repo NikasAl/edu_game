@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, ArrowRight, BookOpen, CheckCircle2, Eye, Lightbulb, Map as MapIcon, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
+import { ArrowLeft, ArrowRight, BookOpen, CheckCircle2, Eye, Lightbulb, Map as MapIcon, PencilLine, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils';
 export default function NodeView({ nodeId }: { nodeId: string }) {
   const closeNode = useAppStore((s) => s.closeNode);
   const openNode = useAppStore((s) => s.openNode);
+  const openNodeEditor = useAppStore((s) => s.openNodeEditor);
   const activeMaterialId = useAppStore((s) => s.activeMaterialId);
   const providers = useAppStore((s) => s.providers);
   const activeProvider = providers.find((p) => p.isActive) ?? null;
@@ -83,6 +84,9 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
             <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{region?.title}</p>
             <h1 className="truncate text-base font-semibold">{node.title}</h1>
           </div>
+          <Button variant="ghost" size="icon" onClick={() => openNodeEditor(node.id)} aria-label="Редактор узла">
+            <PencilLine className="h-5 w-5" />
+          </Button>
         </div>
         {/* Чипы испытаний */}
         <div className="mx-auto flex max-w-lg gap-1.5 px-4 pb-2.5">
@@ -109,6 +113,24 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
 
           {/* Карточка идеи */}
           <IdeaCard node={node} />
+
+          {/* Непроходимый узел: генерация задач не удалась */}
+          {tasks.length === 0 && (
+            <Card className="border-amber-500/40 bg-amber-500/5">
+              <CardContent className="flex flex-col gap-2 p-4">
+                <p className="flex items-center gap-1.5 text-sm font-medium text-amber-300">
+                  <Sparkles className="h-4 w-4" /> У узла нет задач — он непроходим
+                </p>
+                <p className="text-xs leading-snug text-muted-foreground">
+                  Похоже, генерация задач не удалась. Без задач узел нельзя завершить и перейти к следующим. Открой
+                  редактор: сгенерируй задачи заново или добавь вручную.
+                </p>
+                <Button variant="outline" size="sm" className="self-start" onClick={() => openNodeEditor(node.id)}>
+                  <PencilLine className="mr-1 h-4 w-4" /> Открыть редактор
+                </Button>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Освоено: празднование */}
           {allDone && (

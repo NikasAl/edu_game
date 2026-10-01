@@ -280,6 +280,34 @@ export async function saveDraftPatch(
   await db.drafts.put(next);
 }
 
+/**
+ * Убрать ответы на конкретную задачу из черновика узла.
+ * Используется при изменении ответа задачи в редакторе: набранный
+ * ответ по старой постановке больше не имеет смысла.
+ */
+export async function clearTaskDraft(nodeId: string, taskId: string): Promise<void> {
+  const d = await db.drafts.get(nodeId);
+  if (!d) return;
+  if (!(taskId in d.taskAnswers) && !(taskId in d.taskChoices)) return;
+  const taskAnswers = { ...d.taskAnswers };
+  const taskChoices = { ...d.taskChoices };
+  delete taskAnswers[taskId];
+  delete taskChoices[taskId];
+  await db.drafts.put({ ...d, taskAnswers, taskChoices, updatedAt: new Date() });
+}
+
+/**
+ * Сбросить прогресс узла: удалить все попытки и черновик ответов.
+ * Используется после ручной правки узла, когда старые зачёты
+ * (например, по исправленной задаче) больше не отражают знания.
+ */
+export async function resetNodeProgress(nodeId: string): Promise<void> {
+  await db.transaction('rw', db.attempts, db.drafts, async () => {
+    await db.attempts.where('nodeId').equals(nodeId).delete();
+    await db.drafts.delete(nodeId);
+  });
+}
+
 /** id карты + id всех её потомков (защита от циклов включена) */
 export function collectSubtreeIds(materials: Material[], rootId: string): string[] {
   const byParent = new Map<string | null, Material[]>();

@@ -9,12 +9,14 @@ import MapsPanel from '@/components/app/MapsPanel';
 import ImportPanel from '@/components/app/ImportPanel';
 import SettingsPanel from '@/components/app/SettingsPanel';
 import NodeView from '@/components/app/NodeView';
+import NodeEditor from '@/components/app/NodeEditor';
 
 export default function Home() {
   const hydrated = useAppStore((s) => s.hydrated);
   const init = useAppStore((s) => s.init);
   const activeTab = useAppStore((s) => s.activeTab);
   const openNodeId = useAppStore((s) => s.openNodeId);
+  const editNodeId = useAppStore((s) => s.editNodeId);
 
   useEffect(() => {
     void init();
@@ -42,6 +44,7 @@ export default function Home() {
       </main>
       <BottomNav />
       {openNodeId && <NodeView nodeId={openNodeId} />}
+      {editNodeId && <NodeEditor />}
     </div>
   );
 }

@@ -13,6 +13,7 @@ import type {
   OwnTaskVerdict,
   ParsedAtom,
   Task,
+  TaskInstance,
 } from './types';
 import { normalizeText } from './safeMath';
 
@@ -527,6 +528,190 @@ export async function ocrTextbookPage(
     jsonMode: false,
   });
   return res.content.trim();
+}
+
+// ============ 7. Редактор узла: проверка и исправление ============
+
+/** Отчёт LLM-проверки элемента узла (задача или идея) */
+export interface CheckReport {
+  ok: boolean;
+  problems: string[]; // конкретные проблемы (пусто, если ok)
+  feedback: string; // общий вердикт 1–3 предложения
+}
+
+const CHECK_TASK_PROMPT = `Ты — методист, проверяющий учебную задачу. Реши задачу самостоятельно и проверь по пунктам:
+1. Условие: понятное, однозначное, данных достаточно;
+2. Ответ: твой ответ совпадает с эталонным (эталон вычислен решателем — доверяй арифметике решателя, но проверь, соответствует ли формула условию);
+3. Разбор (explanation): верен, ведёт именно к эталонному ответу;
+4. Подсказки: первая — только направление, вторая — шаг, готовый ответ не раскрывают.
+Если указаны значения параметров — подставь ИМЕННО их. Ответ задач с выбором — один из опций, ровно один верный.
+Верни СТРОГО JSON: {"ok":true|false,"problems":["конкретная проблема"],"feedback":"вердикт 1–3 предложения"}`;
+
+/**
+ * Проверить задачу LLM. sample — детерминированный экземпляр
+ * (значения параметров = первые из choices), чтобы проверяющий
+ * сверял ответ для конкретных чисел.
+ */
+export async function checkTaskLLM(
+  provider: LLMProvider,
+  node: { title: string; formulation: string },
+  task: Task,
+  sample: TaskInstance
+): Promise<CheckReport> {
+  const spec = task.answerSpec;
+  let expected = '';
+  if (spec.kind === 'numeric') {
+    const v = sample.answer as number;
+    expected = `${Number.isInteger(v) ? v : Math.round(v * 100) / 100} (допуск ±${spec.tolerance ?? 0.01})`;
+  } else if (spec.kind === 'exact') {
+    expected = `«${spec.value}»${spec.alts?.length ? ` (также засчитывается: ${spec.alts.join('; ')})` : ''}`;
+  } else {
+    expected = `«${spec.options[spec.correctIndex]}» (индекс ${spec.correctIndex})`;
+  }
+  const valuesNote =
+    task.params && task.params.length > 0
+      ? `\nЗначения параметров для проверки: ${task.params.map((p) => `${p.name}=${sample.values[p.name] ?? p.choices[0]}`).join(', ')}`
+      : '';
+  const messages: LLMMessage[] = [
+    { role: 'system', content: SYSTEM },
+    {
+      role: 'user',
+      content: `${CHECK_TASK_PROMPT}\n\nИдея: «${node.title}» — ${node.formulation}\n\nТип задачи: ${task.type}\nШаблон условия: ${task.prompt}${valuesNote}\nЭкземпляр для проверки: ${sample.renderedPrompt}\nЭталонный ответ: ${expected}\n\nПодсказки:\n${task.hints.map((h, i) => `${i + 1}. ${h}`).join('\n') || '(нет)'}\n\nРазбор:\n${task.explanation || '(нет)'}`,
+    },
+  ];
+  const res = await callLLM(provider, messages, { temperature: 0.1, maxTokens: 4000, op: 'check_task' });
+  const parsed = extractJson<CheckReport>(res.content);
+  return {
+    ok: Boolean(parsed.ok),
+    problems: Array.isArray(parsed.problems) ? parsed.problems.filter((p) => typeof p === 'string' && p.trim()).slice(0, 8) : [],
+    feedback: parsed.feedback ?? '',
+  };
+}
+
+const CHECK_IDEA_PROMPT = `Проверь карточку идеи (атом знаний) как методист:
+- formulation: фактически верна и атомарна (ровно одна идея, одно предложение);
+- example: наглядный пример, соответствующий идее, без ошибок;
+- feynmanQuestion: вопрос требует объяснения своими словами (а не «перескажи определение»);
+- keyTerms: ключевые термины соответствуют идее.
+Не выдумывай ошибок: если всё верно — так и скажи.
+Верни СТРОГО JSON: {"ok":true|false,"problems":["конкретная проблема"],"feedback":"вердикт 1–3 предложения"}`;
+
+export async function checkIdeaLLM(
+  provider: LLMProvider,
+  node: {
+    title: string;
+    formulation: string;
+    example: string;
+    misconception?: string;
+    feynmanQuestion: string;
+    keyTerms: string[];
+  }
+): Promise<CheckReport> {
+  const messages: LLMMessage[] = [
+    { role: 'system', content: SYSTEM },
+    {
+      role: 'user',
+      content: `${CHECK_IDEA_PROMPT}\n\nНазвание: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\nЧастая ошибка: ${node.misconception || '(не указана)'}\nВопрос Фейнмана: ${node.feynmanQuestion}\nКлючевые термины: ${node.keyTerms.join(', ') || '(нет)'}`,
+    },
+  ];
+  const res = await callLLM(provider, messages, { temperature: 0.1, maxTokens: 3000, op: 'check_idea' });
+  const parsed = extractJson<CheckReport>(res.content);
+  return {
+    ok: Boolean(parsed.ok),
+    problems: Array.isArray(parsed.problems) ? parsed.problems.filter((p) => typeof p === 'string' && p.trim()).slice(0, 8) : [],
+    feedback: parsed.feedback ?? '',
+  };
+}
+
+const FIX_TASK_PROMPT = `Исправь учебную задачу: устрани проблемы (или сделай её лучше по указанию пользователя), сохранив тему идеи и уровень сложности. Если ответ неверен — реши задачу заново и дай верный ответ.
+
+Правила (как при создании задач):
+- задача типа numeric: ПАРАМЕТРИЧЕСКАЯ — 2–4 параметра с 3–4 допустимыми значениями каждый; поле expr — чистый синтаксис решателя (числа, параметры, + - * / ^, скобки, sqrt/abs/min/max/round), НЕ LaTeX; ответ вычислим по expr при любых комбинациях значений;
+- текст prompt может содержать LaTeX \( \) и подстановки вида {{имя_параметра}};
+- задача типа exact: короткий однозначный текстовый ответ (value) и варианты написания (alts);
+- задача типа choice: 3 опции, ровно одна верная (correctIndex);
+- hints: 2 подсказки (направление, шаг — без готового ответа);
+- explanation: полный разбор, приводящий к ответу;
+- всё по-русски.
+
+Верни СТРОГО JSON одной задачи:
+{"type":"numeric","prompt":"...","params":[{"name":"a","choices":[1,2,3]}],"expr":"...","hints":["...","..."],"explanation":"..."}
+(для exact — {"type":"exact","prompt":"...","value":"...","alts":["..."],...}; для choice — {"type":"choice","prompt":"...","options":["А","Б","В"],"correctIndex":0,...})`;
+
+/**
+ * Исправить задачу LLM. Возвращает черновик задачи в том же формате,
+ * что и генерация (применение — через generatedToTask с сохранением id).
+ */
+export async function fixTaskLLM(
+  provider: LLMProvider,
+  node: { title: string; formulation: string; example: string },
+  task: Task,
+  problems?: string[]
+): Promise<GeneratedTasks['tasks'][number]> {
+  const spec = task.answerSpec;
+  let answerLine = '';
+  if (spec.kind === 'numeric') answerLine = `expr: ${spec.expr}`;
+  else if (spec.kind === 'exact') answerLine = `value: ${spec.value}${spec.alts?.length ? ` (alts: ${spec.alts.join('; ')})` : ''}`;
+  else answerLine = `options: [${spec.options.map((o, i) => `${i === spec.correctIndex ? '✓' : ''}${o}`).join(' | ')}], correctIndex: ${spec.correctIndex}`;
+  const messages: LLMMessage[] = [
+    { role: 'system', content: SYSTEM },
+    {
+      role: 'user',
+      content: `${FIX_TASK_PROMPT}\n\nИдея: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\n\nЗАДАЧА (тип ${task.type}):\nУсловие: ${task.prompt}\n${spec.kind === 'numeric' && task.params?.length ? `Параметры: ${JSON.stringify(task.params)}\n` : ''}${answerLine}\nПодсказки: ${task.hints.join(' | ') || '(нет)'}\nРазбор: ${task.explanation || '(нет)'}\n${problems?.length ? `\nНАЙДЕННЫЕ ПРОБЛЕМЫ (устрани их):\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`,
+    },
+  ];
+  const res = await callLLM(provider, messages, { temperature: 0.3, maxTokens: 50000, op: 'fix_task' });
+  const parsed = extractJson<GeneratedTasks['tasks'][number]>(res.content);
+  if (!parsed.prompt || (!parsed.explanation && !parsed.expr && !parsed.value && !parsed.options)) {
+    throw new Error('LLM вернул неполное исправление задачи');
+  }
+  return parsed;
+}
+
+export interface FixedIdea {
+  title: string;
+  formulation: string;
+  example: string;
+  misconception: string; // пустая строка = нет
+  feynmanQuestion: string;
+  keyTerms: string[];
+}
+
+const FIX_IDEA_PROMPT = `Исправь карточку идеи (атом знаний): устрани фактические ошибки, сделай формулировку точной и атомарной (ровно одна идея, одно предложение), пример — наглядным и строго соответствующим идее, вопрос Фейнмана — требующим объяснения своими словами. Частая ошибка — типичное заблуждение учеников по этой идее (если неуместно — пустая строка). Название оставь коротким (2–5 слов).
+Верни СТРОГО JSON:
+{"title":"...","formulation":"...","example":"...","misconception":"...","feynmanQuestion":"...","keyTerms":["3-6 терминов"]}`;
+
+/** Исправить карточку идеи LLM. Применение — в черновик редактора, сохранение вручную. */
+export async function fixIdeaLLM(
+  provider: LLMProvider,
+  node: {
+    title: string;
+    formulation: string;
+    example: string;
+    misconception?: string;
+    feynmanQuestion: string;
+    keyTerms: string[];
+  },
+  problems?: string[]
+): Promise<FixedIdea> {
+  const messages: LLMMessage[] = [
+    { role: 'system', content: SYSTEM },
+    {
+      role: 'user',
+      content: `${FIX_IDEA_PROMPT}\n\nНазвание: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\nЧастая ошибка: ${node.misconception || '(не указана)'}\nВопрос Фейнмана: ${node.feynmanQuestion}\nКлючевые термины: ${node.keyTerms.join(', ') || '(нет)'}\n${problems?.length ? `\nНАЙДЕННЫЕ ПРОБЛЕМЫ (устрани их):\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`,
+    },
+  ];
+  const res = await callLLM(provider, messages, { temperature: 0.3, maxTokens: 8000, op: 'fix_idea' });
+  const parsed = extractJson<FixedIdea>(res.content);
+  if (!parsed.formulation || !parsed.example) throw new Error('LLM вернул неполное исправление идеи');
+  return {
+    title: parsed.title || node.title,
+    formulation: parsed.formulation,
+    example: parsed.example,
+    misconception: parsed.misconception ?? '',
+    feynmanQuestion: parsed.feynmanQuestion || node.feynmanQuestion,
+    keyTerms: Array.isArray(parsed.keyTerms) ? parsed.keyTerms.slice(0, 8).map(String) : node.keyTerms,
+  };
 }
 
 // ============ utils ============
