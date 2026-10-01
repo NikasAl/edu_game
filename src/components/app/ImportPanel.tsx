@@ -7,10 +7,13 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Eye,
   FileText,
+  ImageOff,
   Link2,
   Loader2,
   Map as MapIcon,
+  Minus,
   Save,
   ScanText,
   Sparkles,
@@ -21,6 +24,7 @@ import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -47,6 +51,7 @@ import {
   renderPdfPageToDataUrl,
   type ExtractedSection,
   type OpenedPdf,
+  type PdfDoc,
 } from '@/lib/extract';
 import type { EdgeKind, IdeaEdge, IdeaNode, LLMProvider, Material, Region, Task } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
@@ -56,6 +61,14 @@ type SourceMode = 'paste' | 'url' | 'pdf';
 
 /** Диапазон страниц PDF для OCR-режима */
 type OcrSpan = { id: string; title: string; from: number; to: number };
+
+/**
+ * Разрешение картинки, отправляемой в vision-модель на распознавание.
+ * Модели сами ужимают вход до ~1–2 тыс. px — если отдать страницу мелкой,
+ * текст на ней становится нечитаемым, поэтому рендерим крупно.
+ */
+const OCR_RENDER_WIDTH = 2200;
+const OCR_RENDER_QUALITY = 0.9;
 
 /** Столько атомов показывается в ревью и сохраняется (остальные отбрасываются) */
 const MAX_ATOMS = 60;
@@ -89,11 +102,16 @@ export default function ImportPanel() {
   // LLM OCR для PDF (сканы / сломанный текстовый слой)
   const [pdfOcrMode, setPdfOcrMode] = useState(false);
   const [ocrSpans, setOcrSpans] = useState<OcrSpan[]>([]);
-  const [ocrSelectedIds, setOcrSelectedIds] = useState<Set<string>>(new Set());
+  // выбор ПОСТРАНИЧНЫЙ: пользователь может взять отдельные страницы из группы
+  const [ocrSelectedPages, setOcrSelectedPages] = useState<Set<number>>(new Set());
+  // увеличенный предпросмотр одной страницы (диалог)
+  const [previewPage, setPreviewPage] = useState<number | null>(null);
   const [ocrNumPages, setOcrNumPages] = useState(0);
   const [ocrSource, setOcrSource] = useState('');
   const [ocrBusy, setOcrBusy] = useState(false);
   const pdfDocRef = useRef<OpenedPdf | null>(null);
+  /** PDF-документ для рендера (реактивная копия ref — доступна в JSX) */
+  const [ocrDoc, setOcrDoc] = useState<PdfDoc | null>(null);
   const ocrCancelRef = useRef(false);
 
   // OCR-провайдер — тот же, что и для «OCR с фото» (Настройки → OCR с фото)
@@ -108,6 +126,15 @@ export default function ImportPanel() {
     if (!base) return null;
     return ocrModel.trim() ? { ...base, model: ocrModel.trim() } : base;
   }, [ocrProviderId, ocrModel, providers, activeProvider]);
+
+  // закрыть PDF при уходе со вкладки — иначе воркер pdf.js остаётся в памяти
+  useEffect(
+    () => () => {
+      void pdfDocRef.current?.destroy();
+      pdfDocRef.current = null;
+    },
+    []
+  );
 
   // фаза выбора секций (URL/PDF)
   const [extractTitle, setExtractTitle] = useState('');
@@ -206,13 +233,16 @@ export default function ImportPanel() {
         setProgressMsg('Открываю PDF…');
         const opened = await openPdf(buf);
         pdfDocRef.current = opened;
+        setOcrDoc(opened.doc);
         const info = await pdfPageSpans(opened.doc, file.name);
         setOcrSource(file.name);
         setOcrNumPages(info.numPages);
         setOcrSpans(info.spans.map((s, i) => ({ ...s, id: `sp${i}` })));
         setExtractTitle(info.title);
         // маленькие документы отмечаем целиком, большие — выбор за пользователем
-        setOcrSelectedIds(new Set(info.numPages <= 6 ? info.spans.map((_, i) => `sp${i}`) : []));
+        setOcrSelectedPages(
+          info.numPages <= 6 ? new Set(Array.from({ length: info.numPages }, (_, i) => i + 1)) : new Set()
+        );
         setPhase('pdfOcr');
       } else {
         setProgressMsg('Читаю PDF…');
@@ -229,19 +259,53 @@ export default function ImportPanel() {
   const closePdfDoc = () => {
     void pdfDocRef.current?.destroy();
     pdfDocRef.current = null;
+    setOcrDoc(null);
   };
 
-  const toggleOcrSpan = (id: string) => {
-    setOcrSelectedIds((prev) => {
+  const toggleOcrPage = (page: number) => {
+    setOcrSelectedPages((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(page)) next.delete(page);
+      else next.add(page);
       return next;
     });
   };
 
-  const ocrSelected = ocrSpans.filter((s) => ocrSelectedIds.has(s.id));
-  const ocrPageCount = ocrSelected.reduce((n, s) => n + (s.to - s.from + 1), 0);
+  /** Чекбокс группы: всё выбрано → снять; иначе отметить всю группу */
+  const toggleOcrGroup = (from: number, to: number) => {
+    setOcrSelectedPages((prev) => {
+      const next = new Set(prev);
+      const pages = Array.from({ length: to - from + 1 }, (_, i) => from + i);
+      const allSelected = pages.every((p) => next.has(p));
+      for (const p of pages) {
+        if (allSelected) next.delete(p);
+        else next.add(p);
+      }
+      return next;
+    });
+  };
+
+  const ocrSelectedCount = ocrSelectedPages.size;
+
+  /** Группы страниц для отображения: секции оглавления; одиночные авто-страницы
+   *  («Страница N» без оглавления) сливаются в один сплошной список миниатюр */
+  const ocrGroups = useMemo(() => {
+    const groups: { key: string; title: string | null; pages: number[] }[] = [];
+    const maxPage = ocrNumPages || Number.MAX_SAFE_INTEGER;
+    for (const sp of ocrSpans) {
+      const to = Math.min(sp.to, maxPage);
+      const pages = Array.from({ length: Math.max(0, to - sp.from + 1) }, (_, i) => sp.from + i);
+      if (pages.length === 0) continue;
+      const isAutoSingle = pages.length === 1 && /^Страница \d+$/.test(sp.title);
+      const prev = groups[groups.length - 1];
+      if (isAutoSingle && prev && prev.title === null) {
+        prev.pages.push(...pages);
+      } else {
+        groups.push({ key: sp.id, title: isAutoSingle ? null : sp.title || null, pages });
+      }
+    }
+    return groups;
+  }, [ocrSpans, ocrNumPages]);
 
   const runPdfOcr = async () => {
     const opened = pdfDocRef.current;
@@ -251,12 +315,13 @@ export default function ImportPanel() {
       toast.error('Нужен LLM-провайдер с vision-моделью — настрой его в «Настройки → OCR с фото»');
       return;
     }
-    if (ocrSelected.length === 0) {
-      toast.error('Отметь хотя бы один диапазон страниц');
+    const selected = [...ocrSelectedPages].sort((a, b) => a - b);
+    if (selected.length === 0) {
+      toast.error('Отметь хотя бы одну страницу');
       return;
     }
-    if (ocrPageCount > 40) {
-      toast.warning(`${ocrPageCount} страниц — распознавание займёт много времени и токенов`);
+    if (selected.length > 40) {
+      toast.warning(`${selected.length} страниц — распознавание займёт много времени и токенов`);
     }
     setOcrBusy(true);
     setProgressVal(0);
@@ -265,25 +330,29 @@ export default function ImportPanel() {
     try {
       let done = 0;
       let cancelled = false;
-      for (const sp of ocrSelected) {
+      for (const sp of ocrSpans) {
         if (cancelled) break;
-        const pages: string[] = [];
-        for (let p = sp.from; p <= Math.min(sp.to, doc.numPages); p++) {
+        const lastPage = Math.min(sp.to, doc.numPages);
+        const pagesInSpan = selected.filter((p) => p >= sp.from && p <= lastPage);
+        if (pagesInSpan.length === 0) continue;
+        const texts: string[] = [];
+        for (const p of pagesInSpan) {
           if (ocrCancelRef.current) {
             cancelled = true;
             break;
           }
-          setProgressMsg(`OCR: страница ${p} (${done + 1}/${ocrPageCount})…`);
+          setProgressMsg(`OCR: страница ${p} (${done + 1}/${selected.length})…`);
           try {
-            const dataUrl = await renderPdfPageToDataUrl(doc, p);
-            pages.push(await ocrTextbookPage(ocrProvider, dataUrl));
+            const dataUrl = await renderPdfPageToDataUrl(doc, p, OCR_RENDER_WIDTH, OCR_RENDER_QUALITY);
+            const text = await ocrTextbookPage(ocrProvider, dataUrl);
+            texts.push(text.trim().length > 0 ? text : `[страница ${p}: модель вернула пустой ответ]`);
           } catch (e) {
-            pages.push(`[страница ${p} не распознана: ${e instanceof Error ? e.message : 'ошибка'}]`);
+            texts.push(`[страница ${p} не распознана: ${e instanceof Error ? e.message : 'ошибка'}]`);
           }
           done++;
-          setProgressVal(Math.round((done / ocrPageCount) * 100));
+          setProgressVal(Math.round((done / selected.length) * 100));
         }
-        const text = pages.join('\n\n').trim();
+        const text = texts.join('\n\n').trim();
         if (text.length > 0) {
           sections.push({
             id: `sec${sections.length}`,
@@ -471,6 +540,7 @@ export default function ImportPanel() {
 
       {/* ============ Фаза выбора страниц для LLM OCR ============ */}
       {phase === 'pdfOcr' && (
+        <>
         <Card>
           <CardContent className="flex flex-col gap-3 p-4">
             <div>
@@ -505,7 +575,9 @@ export default function ImportPanel() {
                   size="sm"
                   variant="outline"
                   className="h-7 px-2"
-                  onClick={() => setOcrSelectedIds(new Set(ocrSpans.map((s) => s.id)))}
+                  onClick={() =>
+                    setOcrSelectedPages(new Set(Array.from({ length: ocrNumPages }, (_, i) => i + 1)))
+                  }
                 >
                   Выбрать все
                 </Button>
@@ -513,53 +585,75 @@ export default function ImportPanel() {
                   size="sm"
                   variant="ghost"
                   className="h-7 px-2"
-                  onClick={() => setOcrSelectedIds(new Set())}
+                  onClick={() => setOcrSelectedPages(new Set())}
                 >
                   Снять все
                 </Button>
               </div>
-              <Badge variant={ocrPageCount > 40 ? 'destructive' : 'secondary'}>
-                {ocrPageCount} стр.
+              <Badge variant={ocrSelectedCount > 40 ? 'destructive' : 'secondary'}>
+                {ocrSelectedCount} стр.
               </Badge>
             </div>
 
-            <div className="flex flex-col gap-1">
-              {ocrSpans.map((s) => {
-                const selected = ocrSelectedIds.has(s.id);
+            {/* Группы страниц: заголовок секции + миниатюры с постраничным выбором */}
+            <div className="flex flex-col gap-3">
+              {ocrGroups.map((g) => {
+                const groupFrom = g.pages[0];
+                const groupTo = g.pages[g.pages.length - 1];
+                const allSel = g.pages.every((p) => ocrSelectedPages.has(p));
+                const someSel = g.pages.some((p) => ocrSelectedPages.has(p));
                 return (
-                  <div
-                    key={s.id}
-                    className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 transition-colors ${
-                      selected ? 'border-primary/40 bg-primary/5' : 'border-border bg-card'
-                    }`}
-                  >
-                    <button
-                      onClick={() => toggleOcrSpan(s.id)}
-                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
-                        selected
-                          ? 'border-primary bg-primary text-primary-foreground'
-                          : 'border-muted-foreground/40'
-                      }`}
-                      aria-label={selected ? 'Снять отметку' : 'Отметить страницы'}
-                      aria-pressed={selected}
-                    >
-                      {selected && <Check className="h-3.5 w-3.5" />}
-                    </button>
-                    <span className={`min-w-0 flex-1 truncate text-sm ${selected ? '' : 'text-muted-foreground'}`}>
-                      {s.title}
-                    </span>
-                    <span className="shrink-0 text-[11px] text-muted-foreground">
-                      {s.from === s.to ? `стр. ${s.from}` : `стр. ${s.from}–${s.to}`}
-                    </span>
+                  <div key={g.key}>
+                    {g.title && (
+                      <div className="mb-1.5 flex items-center gap-2">
+                        <button
+                          onClick={() => toggleOcrGroup(groupFrom, groupTo)}
+                          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
+                            allSel
+                              ? 'border-primary bg-primary text-primary-foreground'
+                              : someSel
+                                ? 'border-primary/60 bg-primary/20 text-primary'
+                                : 'border-muted-foreground/40'
+                          }`}
+                          aria-label={allSel ? 'Снять всю группу' : 'Отметить всю группу'}
+                          aria-pressed={allSel}
+                        >
+                          {allSel ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : someSel ? (
+                            <Minus className="h-3.5 w-3.5" />
+                          ) : null}
+                        </button>
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium">{g.title}</span>
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {g.pages.length === 1
+                            ? `стр. ${groupFrom}`
+                            : `стр. ${groupFrom}–${groupTo}`}
+                        </span>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-3 gap-2">
+                      {g.pages.map((p) => (
+                        <PageThumb
+                          key={p}
+                          doc={ocrDoc}
+                          page={p}
+                          selected={ocrSelectedPages.has(p)}
+                          onToggle={() => toggleOcrPage(p)}
+                          onPreview={() => setPreviewPage(p)}
+                        />
+                      ))}
+                    </div>
                   </div>
                 );
               })}
             </div>
 
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Каждая страница — отдельный vision-запрос: формулы переводятся в LaTeX, колонтитулы
-              отбрасываются. Медленнее текстового слоя, зато работает для сканов и учебников со
-              сложными формулами.
+              Каждая страница — отдельный vision-запрос в высоком разрешении (~2200 px по ширине):
+              формулы переводятся в LaTeX, колонтитулы отбрасываются. Нажми на глаз — увидишь
+              страницу крупно: если текст не читается даже в предпросмотре, модель его тоже не
+              разберёт. Отмечать можно отдельные страницы, не всю группу.
             </p>
 
             {ocrBusy ? (
@@ -580,7 +674,7 @@ export default function ImportPanel() {
                   onClick={() => {
                     setPhase('input');
                     setOcrSpans([]);
-                    setOcrSelectedIds(new Set());
+                    setOcrSelectedPages(new Set());
                     closePdfDoc();
                   }}
                 >
@@ -589,14 +683,43 @@ export default function ImportPanel() {
                 <Button
                   className="flex-1"
                   onClick={() => void runPdfOcr()}
-                  disabled={ocrSelected.length === 0 || !ocrProvider}
+                  disabled={ocrSelectedCount === 0 || !ocrProvider}
                 >
-                  <ScanText className="mr-1 h-4 w-4" /> Распознать ({ocrPageCount} стр.)
+                  <ScanText className="mr-1 h-4 w-4" /> Распознать ({ocrSelectedCount} стр.)
                 </Button>
               </div>
             )}
           </CardContent>
         </Card>
+
+        {/* Увеличенный предпросмотр страницы — так её увидит модель */}
+        <Dialog open={previewPage !== null} onOpenChange={(o) => !o && setPreviewPage(null)}>
+          <DialogContent className="max-h-[90dvh] overflow-y-auto thin-scroll">
+            <DialogHeader>
+              <DialogTitle>Страница {previewPage} — предпросмотр</DialogTitle>
+            </DialogHeader>
+            {previewPage !== null && ocrDoc && (
+              <OcrPagePreview key={previewPage} doc={ocrDoc} page={previewPage} />
+            )}
+            {previewPage !== null && (
+              <Button
+                variant={ocrSelectedPages.has(previewPage) ? 'outline' : 'default'}
+                onClick={() => {
+                  if (previewPage !== null) toggleOcrPage(previewPage);
+                }}
+              >
+                {ocrSelectedPages.has(previewPage)
+                  ? 'Не распознавать эту страницу'
+                  : 'Распознавать эту страницу'}
+              </Button>
+            )}
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Рендер в том же разрешении, что и для OCR. Если текст здесь читается, но модель
+              распознаёт плохо — попробуй другую vision-модель в «Настройки → OCR с фото».
+            </p>
+          </DialogContent>
+        </Dialog>
+        </>
       )}
 
       {/* ============ Фаза выбора секций извлечения ============ */}
@@ -1012,4 +1135,129 @@ function ReviewList({ onBack, onSave }: { onBack: () => void; onSave: () => void
       </div>
     </div>
   );
+}
+
+/** Миниатюра страницы PDF с ленивой отрисовкой по мере прокрутки */
+function PageThumb({
+  doc,
+  page,
+  selected,
+  onToggle,
+  onPreview,
+}: {
+  doc: PdfDoc | null;
+  page: number;
+  selected: boolean;
+  onToggle: () => void;
+  onPreview: () => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [thumb, setThumb] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!doc) return;
+    const el = ref.current;
+    if (!el) return;
+    let cancelled = false;
+    const render = () => {
+      void renderPdfPageToDataUrl(doc, page, 340, 0.72)
+        .then((url) => {
+          if (!cancelled) setThumb(url);
+        })
+        .catch(() => {
+          if (!cancelled) setFailed(true);
+        });
+    };
+    // рисуем только когда миниатюма приблизилась к видимой области —
+    // иначе сотни страниц рендерились бы все разом
+    let io: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver === 'undefined') {
+      render();
+    } else {
+      io = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((e) => e.isIntersecting)) {
+            io?.disconnect();
+            render();
+          }
+        },
+        { rootMargin: '400px' }
+      );
+      io.observe(el);
+    }
+    return () => {
+      cancelled = true;
+      io?.disconnect();
+    };
+  }, [doc, page]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={onToggle}
+        aria-label={`Страница ${page}: ${selected ? 'снять отметку' : 'распознавать'}`}
+        aria-pressed={selected}
+        className={`flex aspect-[3/4] w-full items-center justify-center overflow-hidden rounded-lg border-2 bg-muted/40 transition-colors ${
+          selected ? 'border-primary' : 'border-transparent hover:border-border'
+        }`}
+      >
+        {thumb ? (
+          <img src={thumb} alt={`Страница ${page}`} className="h-full w-full object-cover object-top" />
+        ) : failed ? (
+          <ImageOff className="h-5 w-5 text-muted-foreground" />
+        ) : (
+          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        )}
+        <span className="absolute bottom-1 left-1 rounded bg-background/85 px-1 text-[10px] font-medium text-foreground">
+          {page}
+        </span>
+        {selected && (
+          <span className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
+            <Check className="h-3 w-3" />
+          </span>
+        )}
+      </button>
+      <button
+        onClick={onPreview}
+        aria-label={`Предпросмотр страницы ${page}`}
+        className="absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-background/85 text-muted-foreground shadow-sm transition-colors hover:text-foreground"
+      >
+        <Eye className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+/** Полный предпросмотр страницы: рендер с тем же качеством, что и для OCR.
+ *  Монтируется с key={page} — состояние сбрасывается при смене страницы. */
+function OcrPagePreview({ doc, page }: { doc: PdfDoc; page: number }) {
+  const [img, setImg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void renderPdfPageToDataUrl(doc, page, OCR_RENDER_WIDTH, OCR_RENDER_QUALITY)
+      .then((url) => {
+        if (!cancelled) setImg(url);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, page]);
+
+  if (failed) {
+    return <p className="text-sm text-destructive">Не удалось отрисовать страницу</p>;
+  }
+  if (!img) {
+    return (
+      <div className="flex h-64 items-center justify-center rounded-lg border bg-muted/30">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+  return <img src={img} alt={`Страница ${page}`} className="w-full rounded-lg border" />;
 }

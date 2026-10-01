@@ -282,15 +282,23 @@ export async function pdfPageSpans(
   return { numPages: doc.numPages, title, spans };
 }
 
-/** Отрендерить страницу PDF в JPEG data URL (для vision-OCR) */
+/**
+ * Отрендерить страницу PDF в JPEG data URL.
+ * Используется и для миниатюр предпросмотра (небольшие maxWidth),
+ * и для vision-OCR (широкий рендер ~2200 px, чтобы модель получила
+ * читаемый текст: vision-API сами ужимают картинку до ~1–2 тыс. px,
+ * поэтому отправлять надо уже большое изображение).
+ */
 export async function renderPdfPageToDataUrl(
   doc: PdfDoc,
   pageNumber: number,
-  maxWidth = 1400
+  maxWidth = 1400,
+  quality = 0.85
 ): Promise<string> {
   const page = await doc.getPage(pageNumber);
   const base = page.getViewport({ scale: 1 });
-  const scale = Math.min(2.5, Math.max(1, maxWidth / base.width));
+  // 0.4 — миниатюры меньше страницы; 4 — запас для OCR-рендера крупным планом
+  const scale = Math.min(4, Math.max(0.4, maxWidth / base.width));
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(viewport.width);
@@ -302,7 +310,7 @@ export async function renderPdfPageToDataUrl(
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
   await page.render({ canvas, viewport }).promise;
-  return canvas.toDataURL('image/jpeg', 0.85);
+  return canvas.toDataURL('image/jpeg', quality);
 }
 
 export async function extractFromPdf(

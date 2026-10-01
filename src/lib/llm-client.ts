@@ -23,7 +23,14 @@ export interface LLMMessage {
 /** Часть мультимодального сообщения (OpenAI-совместимый формат) */
 export type LLMContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string } };
+  | {
+      type: 'image_url';
+      image_url: {
+        url: string;
+        /** OpenAI-стиль: просим полное разрешение, а не экономную downscale-версию */
+        detail?: 'auto' | 'low' | 'high';
+      };
+    };
 
 export interface LLMResponse {
   content: string;

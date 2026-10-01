@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Check, Copy, Download, Moon, Plug, Plus, ScrollText, Share2, Sun, Trash2, Upload } from 'lucide-react';
+import { Check, Copy, Download, Moon, Pencil, Plug, Plus, ScrollText, Share2, Sun, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -26,7 +26,7 @@ import {
   type LLMLogEntry,
 } from '@/lib/llm-client';
 import { useAppStore, type Theme } from '@/store/useAppStore';
-import { PROVIDER_PRESETS, type ProviderType } from '@/lib/types';
+import { PROVIDER_PRESETS, type LLMProvider, type ProviderType } from '@/lib/types';
 
 /** Платформенная среда неизменна за сессию — подписка не нужна */
 const subscribeNoop = () => () => {};
@@ -34,6 +34,7 @@ const subscribeNoop = () => () => {};
 export default function SettingsPanel() {
   const providers = useAppStore((s) => s.providers);
   const addProvider = useAppStore((s) => s.addProvider);
+  const updateProvider = useAppStore((s) => s.updateProvider);
   const deleteProvider = useAppStore((s) => s.deleteProvider);
   const activateProvider = useAppStore((s) => s.activateProvider);
   const theme = useAppStore((s) => s.theme);
@@ -41,6 +42,8 @@ export default function SettingsPanel() {
   const activeMaterialId = useAppStore((s) => s.activeMaterialId);
 
   const [dlgOpen, setDlgOpen] = useState(false);
+  // id провайдера в диалоге редактирования (null = добавление нового)
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [pType, setPType] = useState<ProviderType>('openrouter');
   const [pName, setPName] = useState('');
   const [pUrl, setPUrl] = useState(PROVIDER_PRESETS.openrouter.baseUrl);
@@ -75,6 +78,23 @@ export default function SettingsPanel() {
     setPModel(PROVIDER_PRESETS[t].model);
   };
 
+  const openAdd = () => {
+    setEditingId(null);
+    applyPreset('openrouter');
+    setPName('');
+    setPKey('');
+  };
+
+  const openEdit = (p: LLMProvider) => {
+    setEditingId(p.id);
+    setPType(p.type);
+    setPName(p.name);
+    setPUrl(p.baseUrl);
+    setPModel(p.model);
+    setPKey('');
+    setDlgOpen(true);
+  };
+
   const submitProvider = async () => {
     if (!pUrl.trim().startsWith('http')) {
       toast.error('Base URL должен начинаться с http(s)://');
@@ -84,15 +104,29 @@ export default function SettingsPanel() {
       toast.error('Укажи имя модели');
       return;
     }
-    await addProvider({
-      name: pName.trim() || PROVIDER_PRESETS[pType].label,
-      type: pType,
-      baseUrl: pUrl.trim().replace(/\/+$/, ''),
-      apiKey: pKey.trim(),
-      model: pModel.trim(),
-    });
-    toast.success('Провайдер добавлен');
+    if (editingId) {
+      // при редактировании пустой ключ означает «оставить прежний»
+      const prev = providers.find((x) => x.id === editingId);
+      await updateProvider(editingId, {
+        name: pName.trim() || PROVIDER_PRESETS[pType].label,
+        type: pType,
+        baseUrl: pUrl.trim().replace(/\/+$/, ''),
+        model: pModel.trim(),
+        apiKey: pKey.trim() || prev?.apiKey || '',
+      });
+      toast.success('Провайдер обновлён');
+    } else {
+      await addProvider({
+        name: pName.trim() || PROVIDER_PRESETS[pType].label,
+        type: pType,
+        baseUrl: pUrl.trim().replace(/\/+$/, ''),
+        apiKey: pKey.trim(),
+        model: pModel.trim(),
+      });
+      toast.success('Провайдер добавлен');
+    }
     setDlgOpen(false);
+    setEditingId(null);
     setPName('');
     setPKey('');
   };
@@ -188,13 +222,13 @@ export default function SettingsPanel() {
           <h2 className="text-sm font-medium text-muted-foreground">LLM-провайдеры (OpenAI-совместимые)</h2>
           <Dialog open={dlgOpen} onOpenChange={setDlgOpen}>
             <DialogTrigger asChild>
-              <Button size="sm" variant="outline">
+              <Button size="sm" variant="outline" onClick={openAdd}>
                 <Plus className="mr-1 h-4 w-4" /> Добавить
               </Button>
             </DialogTrigger>
             <DialogContent className="max-h-[85dvh] overflow-y-auto thin-scroll">
               <DialogHeader>
-                <DialogTitle>Новый провайдер</DialogTitle>
+                <DialogTitle>{editingId ? 'Редактирование провайдера' : 'Новый провайдер'}</DialogTitle>
               </DialogHeader>
               <div className="flex flex-col gap-3 pt-1">
                 <div>
@@ -222,10 +256,17 @@ export default function SettingsPanel() {
                   <Input value={pModel} onChange={(e) => setPModel(e.target.value)} placeholder="gpt-4o-mini" />
                 </div>
                 <div>
-                  <Label className="mb-1.5 block">API-ключ {PROVIDER_PRESETS[pType].needsKey ? '' : '(не нужен)'}</Label>
+                  <Label className="mb-1.5 block">
+                    API-ключ
+                    {editingId
+                      ? ' (оставь пустым, чтобы сохранить текущий)'
+                      : PROVIDER_PRESETS[pType].needsKey
+                        ? ''
+                        : ' (не нужен)'}
+                  </Label>
                   <Input value={pKey} onChange={(e) => setPKey(e.target.value)} type="password" placeholder="sk-…" />
                 </div>
-                <Button onClick={submitProvider}>Сохранить</Button>
+                <Button onClick={submitProvider}>{editingId ? 'Сохранить изменения' : 'Сохранить'}</Button>
               </div>
             </DialogContent>
           </Dialog>
@@ -258,6 +299,9 @@ export default function SettingsPanel() {
                           Выбрать
                         </Button>
                       )}
+                      <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground" onClick={() => openEdit(p)} aria-label="Редактировать">
+                        <Pencil className="h-4 w-4" />
+                      </Button>
                       <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground" onClick={() => runTest(p.id)} disabled={testing} aria-label="Проверить">
                         <Plug className="h-4 w-4" />
                       </Button>

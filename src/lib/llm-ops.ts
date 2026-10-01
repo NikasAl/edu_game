@@ -487,7 +487,7 @@ export async function ocrHandwritten(
       role: 'user',
       content: [
         { type: 'text', text: mode === 'short' ? OCR_PROMPT_SHORT : OCR_PROMPT_FULL },
-        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } },
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}`, detail: 'high' } },
       ],
     },
   ];
@@ -516,7 +516,7 @@ export async function ocrTextbookPage(
       role: 'user',
       content: [
         { type: 'text', text: OCR_PAGE_PROMPT },
-        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } },
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}`, detail: 'high' } },
       ],
     },
   ];
