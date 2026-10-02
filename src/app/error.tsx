@@ -19,10 +19,12 @@ export default function ErrorPage({ error, reset }: { error: Error & { digest?: 
         {error.message || 'Неизвестная ошибка интерфейса.'}
       </p>
       <div className="flex gap-2">
+        {/* «На главную» — основная кнопка: reset перерисовывает ту же страницу и
+            при ошибке в данных узла снова падает, а выход на главную всегда безопасен */}
+        <Button onClick={() => window.location.replace('/')}>На главную</Button>
         <Button variant="outline" onClick={reset}>
-          Попробовать снова
+          Повторить попытку
         </Button>
-        <Button onClick={() => window.location.replace('/')}>Перезагрузить приложение</Button>
       </div>
     </div>
   );

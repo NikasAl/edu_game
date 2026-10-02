@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, ArrowRight, BookOpen, CheckCircle2, Eye, Lightbulb, Map as MapIcon, PencilLine, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
+import { ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, Lightbulb, Map as MapIcon, PencilLine, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,7 +15,7 @@ import { db, setMeta } from '@/lib/db';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
-import { checkAnswer, instantiateTask, isParametric } from '@/lib/task-engine';
+import { checkAnswer, instantiateTask, isParametric, taskProblems } from '@/lib/task-engine';
 import { gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
 import type { Attempt, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -393,7 +393,14 @@ function TaskTrial({
   attempt?: Attempt;
   provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
 }) {
-  const [instance, setInstance] = useState<TaskInstance>(() => instantiateTask(task));
+  // экземпляр пересобирается при изменении задачи (правка в редакторе) и по кнопке «другой вариант»
+  const [roll, setRoll] = useState(0);
+  const instance = useMemo(() => instantiateTask(task), [task, roll]);
+  const openNodeEditor = useAppStore((s) => s.openNodeEditor);
+
+  // битая задача (например формула с «%» от LLM): показываем предупреждение вместо падения экрана
+  const problems = useMemo(() => taskProblems(task), [task]);
+  const broken = problems.length > 0;
 
   // черновик ответа: набранный текст/вариант сохраняются и восстанавливаются
   const attemptChoiceIdx = useMemo(() => {
@@ -425,8 +432,8 @@ function TaskTrial({
   const choiceSpec = task.answerSpec.kind === 'choice' ? task.answerSpec : null;
 
   const reRandomize = () => {
-    if (!isParametric(task)) return;
-    setInstance(instantiateTask(task));
+    if (!isParametric(task) || broken) return;
+    setRoll((n) => n + 1);
     setInput('');
     setChoiceIdx(null);
     setVerdict(null);
@@ -435,6 +442,7 @@ function TaskTrial({
   };
 
   const submit = async () => {
+    if (broken) return;
     const userInput = task.type === 'choice' ? String(choiceIdx ?? -1) : input;
     const res = checkAnswer(instance, task.answerSpec, userInput);
     setVerdict(res.verdict);
@@ -491,12 +499,32 @@ function TaskTrial({
           <MathText>{instance.renderedPrompt}</MathText>
         </p>
 
+        {/* Сломанная задача: валидные части показываем, но пройти нельзя — чини в редакторе */}
+        {broken && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+            <p className="flex items-center gap-1.5 font-medium text-amber-300">
+              <AlertTriangle className="h-3.5 w-3.5" /> Задача сломана — её нельзя пройти
+            </p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-amber-200/90">
+              {problems.map((p, i) => (
+                <li key={i}>{p}</li>
+              ))}
+            </ul>
+            <p className="mt-1 text-amber-200/70">
+              Обычно это ошибка в формуле ответа после генерации. Исправь формулу или удали задачу в редакторе узла.
+            </p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={() => openNodeEditor(node.id)}>
+              <PencilLine className="mr-1 h-3.5 w-3.5" /> Открыть редактор
+            </Button>
+          </div>
+        )}
+
         {choiceSpec ? (
           <div className="flex flex-col gap-1.5">
             {choiceSpec.options.map((opt, i) => (
               <button
                 key={i}
-                disabled={passed}
+                disabled={passed || broken}
                 onClick={() => setChoiceIdx(i)}
                 className={cn(
                   'rounded-lg border px-3 py-2.5 text-left text-sm transition-colors',
@@ -513,13 +541,13 @@ function TaskTrial({
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !passed && submit()}
-              disabled={passed}
+              onKeyDown={(e) => e.key === 'Enter' && !passed && !broken && submit()}
+              disabled={passed || broken}
               placeholder="Ответ"
               inputMode="text"
               className="h-10 flex-1 rounded-lg border border-input bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-primary"
             />
-            {!passed && (
+            {!passed && !broken && (
               <PhotoOcr
                 mode="short"
                 label=""
@@ -531,7 +559,7 @@ function TaskTrial({
 
         {!passed && (
           <div className="flex gap-2">
-            <Button onClick={submit} className="flex-1">Ответить</Button>
+            <Button onClick={submit} className="flex-1" disabled={broken}>Ответить</Button>
             <Button variant="outline" onClick={showHint} disabled={hintLevel >= 3 && !provider}>
               <Lightbulb className="mr-1 h-4 w-4" /> Подсказка {Math.min(hintLevel + 1, 3)}/3
             </Button>

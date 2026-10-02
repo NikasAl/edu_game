@@ -43,7 +43,7 @@ import {
   type CheckReport,
 } from '@/lib/llm-ops';
 import { evalExpr } from '@/lib/safeMath';
-import { instantiateTask } from '@/lib/task-engine';
+import { instantiateTask, taskProblems } from '@/lib/task-engine';
 import type {
   AnswerSpec,
   Attempt,
@@ -389,7 +389,12 @@ function TasksEditor({
       if (!node.feynmanQuestion.trim() && gen.feynmanQuestion) {
         await db.nodes.update(node.id, { feynmanQuestion: gen.feynmanQuestion });
       }
-      toast.success(`Добавлено задач: ${rows.length}`);
+      const broken = rows.filter((t) => taskProblems(t).length > 0).length;
+      toast.success(
+        broken > 0
+          ? `Добавлено задач: ${rows.length} · с ошибками: ${broken} — исправь их в карточках ниже`
+          : `Добавлено задач: ${rows.length}`
+      );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось сгенерировать задачи');
     } finally {

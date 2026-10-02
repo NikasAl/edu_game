@@ -1,10 +1,44 @@
 /**
  * Безопасный вычислитель математических выражений.
  * Поддерживает: числа, + - * / ^, скобки, идентификаторы (параметры),
- * функции sqrt, abs, min, max, round.
+ * константы pi/e, функции sqrt, abs, min, max, round, ln, log, log2, exp,
+ * floor, ceil, sign.
  * Используется для решателей параметрических задач (answerSpec.expr),
- * которые приходят из БД — eval() недопустим.
+ * которые приходят из LLM/БД — eval() недопустим.
+ *
+ * Выражения перед вычислением нормализуются (normalizeExpr): %, ×, ÷, √, π,
+ * юникодные минусы и «**» переводятся в синтаксис решателя, поэтому LLM-выражения
+ * вида "a*50%" или "√(b²-4ac)" (без «²») не роняют вычисление.
  */
+
+/**
+ * Привести выражение из «человеческой» записи LLM к синтаксису решателя.
+ * Не бросает исключений.
+ */
+function normalizeExpr(input: string): string {
+  let s = input;
+  // невидимые/юникодные пробелы → обычный пробел
+  s = s.replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, ' ');
+  // юникодные минусы и тире → '-'
+  s = s.replace(/[\u2010-\u2015\u2043\u2212\u2796\uFE63\uFF0D]/g, '-');
+  // знаки умножения/деления
+  s = s.replace(/[\u00D7\u00B7\u2219\u22C5\u2022\uFF0A]/g, '*');
+  s = s.replace(/[\u00F7\u2215\u2044\uFF0F]/g, '/');
+  // '**' как возведение в степень
+  s = s.replace(/\*\*/g, '^');
+  // проценты: '50%' → '50/100', 'p%' → 'p/100'
+  s = s.replace(/%/g, '/100');
+  // греческая пи
+  s = s.replace(/[\u03C0\u03A0]/g, 'pi');
+  // десятичная запятая (цифра,цифра) → точка; прочие запятые — разделители аргументов
+  s = s.replace(/(\d)\s*,\s*(?=\d)/g, '$1.');
+  // корень: √( → sqrt(; √9 → sqrt(9); √a → sqrt(a)
+  s = s.replace(/\u221A\s*\(/g, 'sqrt(');
+  s = s.replace(/\u221A\s*([0-9]+(?:\.[0-9]+)?)/g, 'sqrt($1)');
+  s = s.replace(/\u221A\s*([a-zA-Z_][a-zA-Z_0-9]*)/g, 'sqrt($1)');
+  s = s.replace(/\u221A/g, 'sqrt');
+  return s;
+}
 
 type Token =
   | { t: 'num'; v: number }
@@ -16,10 +50,10 @@ type Token =
 function tokenize(input: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
-  const s = input.replace(/,/g, '.');
+  const s = normalizeExpr(input);
   while (i < s.length) {
     const c = s[i];
-    if (c === ' ' || c === '\t') {
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
       i++;
       continue;
     }
@@ -39,7 +73,7 @@ function tokenize(input: string): Token[] {
       i = j;
       continue;
     }
-    if ('+-*/^'.includes(c)) {
+    if ('+-*/^,'.includes(c)) {
       tokens.push({ t: 'op', v: c });
       i++;
       continue;
@@ -65,6 +99,19 @@ const FUNCS: Record<string, (args: number[]) => number> = {
   min: (a) => Math.min(...a),
   max: (a) => Math.max(...a),
   round: (a) => Math.round(a[0]),
+  ln: (a) => Math.log(a[0]),
+  log: (a) => Math.log10(a[0]),
+  log2: (a) => Math.log2(a[0]),
+  exp: (a) => Math.exp(a[0]),
+  floor: (a) => Math.floor(a[0]),
+  ceil: (a) => Math.ceil(a[0]),
+  sign: (a) => Math.sign(a[0]),
+};
+
+/** Константы, доступные в выражениях, если имя не совпало с параметром */
+const CONSTANTS: Record<string, number> = {
+  pi: Math.PI,
+  e: Math.E,
 };
 
 const PREC: Record<string, number> = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 3 };
@@ -72,6 +119,8 @@ const RIGHT_ASSOC = new Set(['^']);
 
 /**
  * Вычислить выражение. Пример: evalExpr("2*a*t0", { a: 3, t0: 2 }) => 12
+ * Бросает Error с понятным сообщением — для валидации в редакторе.
+ * Для рендера/проверки ответов используй safeEvalExpr (не бросает).
  */
 export function evalExpr(expr: string, vars: Record<string, number> = {}): number {
   const tokens = tokenize(expr);
@@ -145,7 +194,11 @@ export function evalExpr(expr: string, vars: Record<string, number> = {}): numbe
         next(); // consume ')'
         return fn(args);
       }
-      if (!(tok.v in vars)) throw new Error(`Неизвестный параметр: ${tok.v}`);
+      if (!(tok.v in vars)) {
+        const konst = CONSTANTS[tok.v.toLowerCase()];
+        if (konst !== undefined) return konst;
+        throw new Error(`Неизвестный параметр: ${tok.v}`);
+      }
       return vars[tok.v];
     }
     if (tok.t === 'lp') {
@@ -161,6 +214,21 @@ export function evalExpr(expr: string, vars: Record<string, number> = {}): numbe
   if (pos !== tokens.length) throw new Error('Лишние символы в конце выражения');
   if (!Number.isFinite(result)) throw new Error('Результат не является конечным числом');
   return result;
+}
+
+/** Результат безопасного вычисления выражения */
+export type SafeEvalResult = { ok: true; value: number } | { ok: false; error: string };
+
+/**
+ * Вычислить выражение без исключений: ошибки (битая формула из LLM/БД)
+ * возвращаются как { ok: false, error } — рендер не должен падать.
+ */
+export function safeEvalExpr(expr: string, vars: Record<string, number> = {}): SafeEvalResult {
+  try {
+    return { ok: true, value: evalExpr(expr, vars) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Выражение не вычисляется' };
+  }
 }
 
 /** Сравнение численных ответов с допуском */

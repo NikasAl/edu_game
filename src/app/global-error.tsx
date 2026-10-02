@@ -39,7 +39,7 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
               fontSize: 14,
             }}
           >
-            Попробовать снова
+            Повторить попытку
           </button>
           <button
             onClick={() => window.location.replace('/')}
@@ -53,7 +53,7 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
               fontSize: 14,
             }}
           >
-            Перезагрузить
+            Перезагрузить приложение
           </button>
         </div>
       </body>

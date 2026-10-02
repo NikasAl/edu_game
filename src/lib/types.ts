@@ -159,6 +159,7 @@ export interface TaskInstance {
   values: Record<string, number>;
   renderedPrompt: string;
   answer: number | string; // для numeric — число, иначе — эталон
+  answerError?: string; // numeric: непусто, если формула ответа не вычисляется (задача «сломана»)
 }
 
 // ============ Попытки и прогресс ============

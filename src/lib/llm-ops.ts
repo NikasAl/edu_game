@@ -210,7 +210,7 @@ export async function ingestSplitIntoIdeasChunked(
 const TASKS_PROMPT = `Создай для атома знания 2 проверяемых задания.
 
 Требования:
-- задача 1: числовая, ПАРАМЕТРИЧЕСКАЯ — придумай 2–4 параметра с 3–4 допустимыми значениями каждый; ответ должен выражаться формулой от параметров; ВАЖНО: поле expr — чистый синтаксис решателя (только числа, параметры, + - * / ^, скобки, sqrt/abs/min/max/round), НЕ LaTeX;
+- задача 1: числовая, ПАРАМЕТРИЧЕСКАЯ — придумай 2–4 параметра с 3–4 допустимыми значениями каждый; ответ должен выражаться формулой от параметров; ВАЖНО: поле expr — чистый синтаксис решателя: только числа, латинские имена параметров, + - * / ^, скобки и функции sqrt/abs/min/max/round/ln/log/floor/ceil; НЕ LaTeX; НЕ используй символы %, ×, ÷, √, π и запятые (проценты пиши как «x/100», корень — sqrt(x), число пи — pi);
 - текст задачи (prompt) может содержать LaTeX \( \) для формул и подстановки вида {{имя_параметра}};
 - задача 2: с выбором варианта (3 опции) ИЛИ точным коротким текстовым ответом;
 - answers должны быть вычислимы/однозначны; числовой ответ — целое или с <=2 знаками после запятой;
@@ -738,42 +738,71 @@ function trigramSimilarity(a: string, b: string): number {
   return inter / Math.min(ga.size, gb.size);
 }
 
-/** Преобразование сгенерированной LLM задачи в Task для БД */
+/** Строка из ответа LLM → безопасная строка с обрезкой */
+function toStr(v: unknown, cap: number): string {
+  const s = typeof v === 'string' ? v : v == null ? '' : String(v);
+  return s.trim().slice(0, cap);
+}
+
+/** Массив строк из ответа LLM → безопасный список непустых строк */
+function toStrList(v: unknown, capItem: number, capCount: number): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((x) => toStr(x, capItem))
+    .filter((s) => s.length > 0)
+    .slice(0, capCount);
+}
+
+/** Преобразование сгенерированной LLM задачи в Task для БД.
+ *  Санитизация обязательна: LLM может вернуть битовую формулу (например с «%»),
+ *  пустые списки или неверные индексы — валидные куски сохраняем, проблемы
+ *  подсвечивает taskProblems() (экран узла больше не падает). */
 export function generatedToTask(
   gen: GeneratedTasks['tasks'][number],
   ids: { id: string; nodeId: string; materialId: string; orderIndex: number }
 ): Task {
+  const type: Task['type'] = gen.type === 'numeric' || gen.type === 'choice' ? gen.type : 'exact';
   const base: Omit<Task, 'answerSpec'> = {
     id: ids.id,
     nodeId: ids.nodeId,
     materialId: ids.materialId,
-    type: gen.type,
-    prompt: gen.prompt,
-    hints: (gen.hints ?? []).slice(0, 2),
-    explanation: gen.explanation ?? '',
+    type,
+    prompt: toStr(gen.prompt, 4000),
+    hints: toStrList(gen.hints, 500, 2),
+    explanation: toStr(gen.explanation, 4000),
     orderIndex: ids.orderIndex,
     createdAt: new Date(),
   };
-  if (gen.type === 'numeric') {
+  if (type === 'numeric') {
+    // параметры: латинское имя-идентификатор + непустой список конечных чисел
+    const params = (Array.isArray(gen.params) ? gen.params : [])
+      .slice(0, 6)
+      .map((p) => ({
+        name: toStr(p?.name, 40)
+          .replace(/[^a-zA-Z_0-9]/g, '')
+          .replace(/^\d/, '_$&'),
+        choices: (Array.isArray(p?.choices) ? p.choices : [])
+          .filter((c) => typeof c === 'number' && Number.isFinite(c))
+          .slice(0, 8),
+      }))
+      .filter((p) => p.name && p.choices.length > 0);
     return {
       ...base,
-      params: (gen.params ?? []).filter((p) => p.name && Array.isArray(p.choices) && p.choices.length > 0),
-      answerSpec: { kind: 'numeric', expr: gen.expr ?? '0', tolerance: 0.02 },
+      params: params.length > 0 ? params : undefined,
+      answerSpec: { kind: 'numeric', expr: toStr(gen.expr, 500) || '0', tolerance: 0.02 },
     };
   }
-  if (gen.type === 'choice') {
+  if (type === 'choice') {
+    const options = toStrList(gen.options, 300, 6);
+    const correctIndex = Math.min(Math.max(0, Math.round(Number(gen.correctIndex ?? 0)) || 0), Math.max(0, options.length - 1));
     return {
       ...base,
-      answerSpec: {
-        kind: 'choice',
-        options: gen.options ?? [],
-        correctIndex: Math.max(0, gen.correctIndex ?? 0),
-      },
+      answerSpec: { kind: 'choice', options, correctIndex },
     };
   }
   return {
     ...base,
-    answerSpec: { kind: 'exact', value: gen.value ?? '', alts: gen.alts },
+    answerSpec: { kind: 'exact', value: toStr(gen.value, 300), alts: toStrList(gen.alts, 300, 6) },
   };
 }
 
