@@ -1,7 +1,21 @@
 'use client';
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Check, Copy, Download, Moon, Pencil, Plug, Plus, ScrollText, Share2, Sun, Trash2, Upload } from 'lucide-react';
+import {
+  Check,
+  Copy,
+  Download,
+  Loader2,
+  Moon,
+  Pencil,
+  Plug,
+  Plus,
+  ScrollText,
+  Share2,
+  Sun,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -49,7 +63,8 @@ export default function SettingsPanel() {
   const [pUrl, setPUrl] = useState(PROVIDER_PRESETS.openrouter.baseUrl);
   const [pModel, setPModel] = useState(PROVIDER_PRESETS.openrouter.model);
   const [pKey, setPKey] = useState('');
-  const [testing, setTesting] = useState(false);
+  // id провайдера, у которого прямо сейчас идёт проверка соединения
+  const [testingId, setTestingId] = useState<string | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -134,11 +149,14 @@ export default function SettingsPanel() {
   const runTest = async (id: string) => {
     const p = providers.find((x) => x.id === id);
     if (!p) return;
-    setTesting(true);
-    const res = await testProvider(p);
-    setTesting(false);
-    if (res.ok) toast.success(res.message);
-    else toast.error(res.message);
+    setTestingId(id);
+    try {
+      const res = await testProvider(p);
+      if (res.ok) toast.success(res.message);
+      else toast.error(res.message);
+    } finally {
+      setTestingId(null);
+    }
   };
 
   const downloadBackup = (json: string, fname: string) => {
@@ -281,38 +299,74 @@ export default function SettingsPanel() {
           </Card>
         ) : (
           <div className="flex flex-col gap-2">
-            {providers.map((p) => (
-              <Card key={p.id} className={p.isActive ? 'border-primary/50' : ''}>
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="flex items-center gap-2 text-sm font-medium">
+            {providers.map((p) => {
+              const typeLabel = PROVIDER_PRESETS[p.type]?.label ?? p.type;
+              return (
+                <Card key={p.id} className={p.isActive ? 'border-primary/50' : ''}>
+                  <CardContent className="p-4">
+                    {/* имя + тип — на всю ширину, без зажатой правой колонки кнопок */}
+                    <div className="flex items-baseline justify-between gap-2">
+                      <p className="min-w-0 truncate text-sm font-medium" title={p.name}>
                         {p.name}
-                        {p.isActive && <Badge className="gap-1"><Check className="h-3 w-3" /> активен</Badge>}
                       </p>
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">{p.baseUrl}</p>
-                      <p className="text-xs text-muted-foreground">модель: {p.model}</p>
+                      <span className="shrink-0 truncate text-[11px] text-muted-foreground/80" title={typeLabel}>
+                        {typeLabel}
+                      </span>
                     </div>
-                    <div className="flex shrink-0 gap-1">
-                      {!p.isActive && (
-                        <Button size="sm" variant="outline" onClick={() => activateProvider(p.id)}>
+                    {/* реквизиты — на всю ширину карточки; URL переносится, а не обрезается */}
+                    <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{p.baseUrl}</p>
+                    <p className="truncate text-xs text-muted-foreground" title={p.model}>
+                      модель: <span className="font-mono">{p.model}</span>
+                    </p>
+                    {/* действия — отдельной строкой снизу: статус/выбор слева, иконки справа */}
+                    <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-border/60 pt-2.5">
+                      {p.isActive ? (
+                        <Badge className="gap-1">
+                          <Check className="h-3 w-3" /> активен
+                        </Badge>
+                      ) : (
+                        <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={() => activateProvider(p.id)}>
                           Выбрать
                         </Button>
                       )}
-                      <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground" onClick={() => openEdit(p)} aria-label="Редактировать">
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground" onClick={() => runTest(p.id)} disabled={testing} aria-label="Проверить">
-                        <Plug className="h-4 w-4" />
-                      </Button>
-                      <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={() => deleteProvider(p.id)} aria-label="Удалить">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <div className="-mr-1 flex shrink-0">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 text-muted-foreground"
+                          onClick={() => runTest(p.id)}
+                          disabled={testingId === p.id}
+                          aria-label="Проверить соединение"
+                          title="Проверить соединение"
+                        >
+                          {testingId === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plug className="h-4 w-4" />}
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 text-muted-foreground"
+                          onClick={() => openEdit(p)}
+                          aria-label="Редактировать"
+                          title="Редактировать"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={() => deleteProvider(p.id)}
+                          aria-label="Удалить"
+                          title="Удалить"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
         )}
       </section>
