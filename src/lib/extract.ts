@@ -51,8 +51,9 @@ export async function extractFromUrl(url: string): Promise<ExtractResult> {
 
 async function fetchPageText(url: string): Promise<{ text: string; viaReader: boolean }> {
   if (isNativePlatform()) {
-    // нативный HTTP: без CORS и mixed-content ограничений WebView
-    const res = await nativeRequest(url, { method: 'GET' });
+    // нативный HTTP: без CORS и mixed-content ограничений WebView;
+    // веб-страница — не reasoning-LLM, долгий тайм-аут не нужен
+    const res = await nativeRequest(url, { method: 'GET', timeoutMs: 60_000 });
     if (res.status >= 400) throw new Error(`Сервер ответил ${res.status}`);
     return { text: res.body, viaReader: false };
   }

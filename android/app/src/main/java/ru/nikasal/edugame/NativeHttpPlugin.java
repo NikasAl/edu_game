@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
@@ -38,6 +39,12 @@ public class NativeHttpPlugin extends Plugin {
         String method = call.getString("method", "POST");
         JSObject headers = call.getObject("headers");
         String body = call.getString("body");
+        // тайм-аут чтения от JS (reasoning-модели могут думать дольше 5 минут);
+        // 10 минут по умолчанию, жёсткий потолок 30 минут
+        double rawTimeout = call.getDouble("timeoutMs", 600_000.0) != null
+                ? call.getDouble("timeoutMs", 600_000.0)
+                : 600_000.0;
+        final int readTimeoutMs = (int) Math.min(Math.max(rawTimeout, 5_000.0), 1_800_000.0);
 
         if (urlStr == null || urlStr.isEmpty()) {
             call.reject("url is required");
@@ -51,8 +58,7 @@ public class NativeHttpPlugin extends Plugin {
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod(method == null ? "POST" : method);
                 conn.setConnectTimeout(30_000);
-                // reasoning-модели могут думать несколько минут — большой таймаут чтения
-                conn.setReadTimeout(300_000);
+                conn.setReadTimeout(readTimeoutMs);
                 conn.setUseCaches(false);
                 conn.setInstanceFollowRedirects(true);
 
@@ -84,6 +90,8 @@ public class NativeHttpPlugin extends Plugin {
                 result.put("status", status);
                 result.put("body", responseBody);
                 call.resolve(result);
+            } catch (SocketTimeoutException e) {
+                call.reject("Тайм-аут: сервер не ответил за " + (readTimeoutMs / 1000) + " с. Попробуй ещё раз, уменьши фрагмент или выбери более быструю модель.");
             } catch (Exception e) {
                 call.reject("Native HTTP error: " + e.getMessage(), e);
             } finally {

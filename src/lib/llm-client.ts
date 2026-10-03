@@ -11,7 +11,7 @@
  *    сборке/APK релей тихо игнорируется — журнал доступен в настройках).
  */
 import type { LLMProvider } from './types';
-import { nativeRequest } from './nativeHttp';
+import { nativeRequest, DEFAULT_REQUEST_TIMEOUT_MS } from './nativeHttp';
 import { extractJson } from './llm-json';
 
 export interface LLMMessage {
@@ -192,7 +192,7 @@ interface PostResult {
 async function doPost(
   provider: LLMProvider,
   messages: LLMMessage[],
-  options: { temperature?: number; maxTokens?: number; withResponseFormat: boolean }
+  options: { temperature?: number; maxTokens?: number; withResponseFormat: boolean; timeoutMs?: number }
 ): Promise<PostResult> {
   const payload: Record<string, unknown> = {
     model: provider.model,
@@ -210,6 +210,7 @@ async function doPost(
     method: 'POST',
     headers: buildHeaders(provider),
     body: JSON.stringify(payload),
+    timeoutMs: options.timeoutMs,
   });
 }
 
@@ -225,6 +226,8 @@ export async function testProvider(provider: LLMProvider): Promise<{ ok: boolean
         max_tokens: 300,
         temperature: 0,
       }),
+      // проверка соединения должна падать быстро, а не через 10 минут
+      timeoutMs: 45_000,
     });
     if (res.status < 200 || res.status >= 300) {
       return { ok: false, message: `HTTP ${res.status}: ${res.body.slice(0, 200)}` };
@@ -247,9 +250,10 @@ export async function testProvider(provider: LLMProvider): Promise<{ ok: boolean
 export async function callLLM(
   provider: LLMProvider,
   messages: LLMMessage[],
-  options: { temperature?: number; maxTokens?: number; op?: string; jsonMode?: boolean } = {}
+  options: { temperature?: number; maxTokens?: number; op?: string; jsonMode?: boolean; timeoutMs?: number } = {}
 ): Promise<LLMResponse> {
   const op = options.op ?? 'call';
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const url = `${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   const t0 = Date.now();
   let attempts = 0;
@@ -263,7 +267,7 @@ export async function callLLM(
   try {
     // --- попытка 1 ---
     attempts++;
-    let res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false });
+    let res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false, timeoutMs });
     lastStatus = res.status;
     lastRaw = res.body;
 
@@ -275,7 +279,7 @@ export async function callLLM(
     ) {
       await new Promise((r) => setTimeout(r, 2500));
       attempts++;
-      res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false });
+      res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false, timeoutMs });
       lastStatus = res.status;
       lastRaw = res.body;
     }
@@ -283,7 +287,7 @@ export async function callLLM(
     // некоторые провайдеры отклоняют response_format — повторяем без него
     if (res.status === 400 && /response_format/i.test(res.body)) {
       attempts++;
-      res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: false });
+      res = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: false, timeoutMs });
       lastStatus = res.status;
       lastRaw = res.body;
     }
@@ -302,7 +306,7 @@ export async function callLLM(
     if (!content.trim() && finishReason === 'length' && maxTokens !== undefined && maxTokens * 2 <= 100000) {
       attempts++;
       maxTokens = maxTokens * 2;
-      const res2 = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false });
+      const res2 = await doPost(provider, messages, { ...options, maxTokens, withResponseFormat: options.jsonMode !== false, timeoutMs });
       lastStatus = res2.status;
       lastRaw = res2.body;
       if (res2.status >= 200 && res2.status < 300) {

@@ -800,7 +800,7 @@ function TaskEditorCard({
         {open && (
           <>
             <div className="flex flex-col gap-1.5">
-              <Label className="text-xs text-muted-foreground">Условие (LaTeX \( \) и подстановки {'{{param}}'})</Label>
+              <Label className="text-xs text-muted-foreground">Условие (формулы LaTeX в $…$, подстановки {'{{param}}'})</Label>
               <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} className="resize-none" />
             </div>
 
