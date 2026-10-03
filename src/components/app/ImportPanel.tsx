@@ -70,8 +70,16 @@ type OcrSpan = { id: string; title: string; from: number; to: number };
 const OCR_RENDER_WIDTH = 2200;
 const OCR_RENDER_QUALITY = 0.9;
 
-/** Столько атомов показывается в ревью и сохраняется (остальные отбрасываются) */
-const MAX_ATOMS = 60;
+/**
+ * Потолок атомов одного импорта (показываются и сохраняются первые).
+ *
+ * Это НЕ ограничение LLM: связи между узлами (needs) строятся локально по
+ * названиям, а задачи генерируются по одному запросу на атом — контекст модели
+ * от числа узлов не зависит. Ограничение защищает от двух практических
+ * проблем: многочасовой последовательной генерации задач (≈1 мин/атом) и
+ * тормозящего ревью на слабых телефонах.
+ */
+const MAX_ATOMS = 200;
 
 export default function ImportPanel() {
   const providers = useAppStore((s) => s.providers);
@@ -1125,6 +1133,13 @@ export default function ImportPanel() {
   );
 }
 
+/** Оценка времени последовательной генерации задач: ~0,7–1,5 мин на атом */
+function fmtAtomTime(atomCount: number): string {
+  const lo = Math.max(1, Math.round(atomCount * 0.7));
+  const hi = Math.max(lo + 1, Math.round(atomCount * 1.5));
+  return `${lo}–${hi} мин`;
+}
+
 function ReviewList({ onBack, onSave }: { onBack: () => void; onSave: () => void }) {
   const ingestResult = useAppStore((s) => s.ingestResult)!;
   const setIngestResult = useAppStore((s) => s.setIngestResult);
@@ -1142,6 +1157,11 @@ function ReviewList({ onBack, onSave }: { onBack: () => void; onSave: () => void
           Ревью: {ingestResult.atoms.length} атомов, {ingestResult.regions.length} регионов
         </h2>
       </div>
+      <p className="rounded-lg border border-border bg-muted/30 p-2 text-[11px] leading-relaxed text-muted-foreground">
+        После сохранения LLM сгенерирует задачи для каждого атома — по одному запросу, примерно
+        {` ${fmtAtomTime(ingestResult.atoms.length)}`}. Узлы и связи сохраняются сразу, поэтому
+        генерацию задач можно безопасно прервать и догенерировать позже в редакторе узла.
+      </p>
       {ingestResult.atoms.length > MAX_ATOMS && (
         <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-300">
           Показаны первые {MAX_ATOMS} из {ingestResult.atoms.length} атомов — при сохранении
