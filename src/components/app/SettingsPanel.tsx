@@ -226,6 +226,13 @@ export default function SettingsPanel() {
   };
   const fmtTime = (ts: number) =>
     new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const fmtDur = (ms: number) => {
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s} с`;
+    const m = Math.floor(s / 60);
+    const rest = s % 60;
+    return rest ? `${m} мин ${rest} с` : `${m} мин`;
+  };
   const fmtMsg = (m: LLMLogEntry['requestMessages'][number]) => `${m.role.toUpperCase()}:\n${m.content}`;
 
   return (
@@ -529,8 +536,9 @@ export default function SettingsPanel() {
                         </Badge>
                         <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{fmtTime(e.ts)}</span>
                         <span className="shrink-0 font-medium">{e.op}</span>
-                        <span className="truncate text-muted-foreground">
-                          HTTP {e.status ?? '—'} · {e.durationMs} мс · попыток {e.attempts}
+                        <span className="truncate text-muted-foreground" title={e.error ?? undefined}>
+                          HTTP {e.status ?? '—'} · {fmtDur(e.durationMs)} · попыток {e.attempts}
+                          {!e.ok && e.error ? ` · ${e.error}` : ''}
                         </span>
                       </summary>
                       <div className="flex flex-col gap-2 border-t border-border/60 px-2.5 py-2">
