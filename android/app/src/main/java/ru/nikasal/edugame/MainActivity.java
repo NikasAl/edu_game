@@ -1,5 +1,8 @@
 package ru.nikasal.edugame;
 
+import android.os.Bundle;
+import android.view.WindowManager;
+
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -21,5 +24,18 @@ public class MainActivity extends BridgeActivity {
     protected void load() {
         registerPlugin(NativeHttpPlugin.class);
         super.load();
+    }
+
+    /**
+     * Держим экран включённым, пока окно приложения на экране (FLAG_KEEP_SCREEN_ON):
+     * длинные LLM-операции (импорт, OCR, генерация задач) не обрываются из-за
+     * системного тайм-аута гашения. Флаг действует, только пока окно видно —
+     * при уходе из приложения экран гаснет по обычным правилам; кнопка
+     * блокировки по-прежнему работает без ограничений.
+     */
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 }

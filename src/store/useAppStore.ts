@@ -5,6 +5,34 @@ import type { IngestResult, LLMProvider, ProviderType, TabId } from '@/lib/types
 
 export type Theme = 'light' | 'dark';
 
+/** Максимальное число сохранённых моделей у одного провайдера */
+const MAX_SAVED_MODELS = 12;
+
+/**
+ * Нормализация списка моделей провайдера: строки без мусора, без дублей,
+ * активная модель (model) всегда в списке первой. Если список уже в норме —
+ * возвращается ПРЕЖНИЙ массив по ссылке, чтобы ленивая миграция в loadProviders
+ * не переписывала базу при каждом запуске.
+ */
+function normalizeModels(p: LLMProvider): string[] {
+  const clean: string[] = [];
+  for (const m of Array.isArray(p.models) ? p.models : []) {
+    if (typeof m === 'string' && m.trim() && !clean.includes(m.trim())) clean.push(m.trim());
+  }
+  if (typeof p.model === 'string' && p.model.trim() && !clean.includes(p.model.trim())) {
+    clean.unshift(p.model.trim());
+  }
+  const capped = clean.slice(0, MAX_SAVED_MODELS);
+  if (
+    Array.isArray(p.models) &&
+    p.models.length === capped.length &&
+    p.models.every((m, i) => m === capped[i])
+  ) {
+    return p.models;
+  }
+  return capped;
+}
+
 interface AppState {
   // Навигация
   activeTab: TabId;
@@ -28,7 +56,7 @@ interface AppState {
   // Провайдеры
   providers: LLMProvider[];
   loadProviders: () => Promise<void>;
-  addProvider: (p: { name: string; type: ProviderType; baseUrl: string; apiKey: string; model: string }) => Promise<void>;
+  addProvider: (p: { name: string; type: ProviderType; baseUrl: string; apiKey: string; model: string; models?: string[] }) => Promise<void>;
   updateProvider: (id: string, p: Partial<LLMProvider>) => Promise<void>;
   deleteProvider: (id: string) => Promise<void>;
   activateProvider: (id: string) => Promise<void>;
@@ -79,7 +107,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   providers: [],
   loadProviders: async () => {
     const providers = await db.providers.toArray();
-    set({ providers });
+    // Ленивая миграция: у записей до введения списка моделей нет поля models —
+    // досоздаём его и сохраняем обратно в базу (однократно; normalizeModels
+    // возвращает прежний массив по ссылке, если менять нечего)
+    const migrated: LLMProvider[] = [];
+    for (const p of providers) {
+      const models = normalizeModels(p);
+      if (models !== p.models) {
+        const fixed = { ...p, models };
+        await db.providers.put(fixed);
+        migrated.push(fixed);
+      } else {
+        migrated.push(p);
+      }
+    }
+    set({ providers: migrated });
   },
   addProvider: async (p) => {
     const now = new Date();

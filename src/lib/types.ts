@@ -63,6 +63,12 @@ export interface LLMProvider {
   baseUrl: string;
   apiKey: string; // может быть пустым для локальных провайдеров
   model: string;
+  /**
+   * Сохранённые модели провайдера (активная — model). У старых записей поля нет:
+   * loadProviders мигрирует его лениво как [model]. Переключение активной модели
+   * не требует перезаписи/вспоминания точного имени.
+   */
+  models?: string[];
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;

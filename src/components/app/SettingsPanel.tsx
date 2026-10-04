@@ -15,6 +15,7 @@ import {
   Sun,
   Trash2,
   Upload,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -62,6 +63,8 @@ export default function SettingsPanel() {
   const [pName, setPName] = useState('');
   const [pUrl, setPUrl] = useState(PROVIDER_PRESETS.openrouter.baseUrl);
   const [pModel, setPModel] = useState(PROVIDER_PRESETS.openrouter.model);
+  // сохранённые модели провайдера в диалоге (применяются при сохранении)
+  const [pModels, setPModels] = useState<string[]>([]);
   const [pKey, setPKey] = useState('');
   // id провайдера, у которого прямо сейчас идёт проверка соединения
   const [testingId, setTestingId] = useState<string | null>(null);
@@ -98,6 +101,7 @@ export default function SettingsPanel() {
     applyPreset('openrouter');
     setPName('');
     setPKey('');
+    setPModels([]);
   };
 
   const openEdit = (p: LLMProvider) => {
@@ -106,6 +110,7 @@ export default function SettingsPanel() {
     setPName(p.name);
     setPUrl(p.baseUrl);
     setPModel(p.model);
+    setPModels(Array.isArray(p.models) ? [...p.models] : p.model ? [p.model] : []);
     setPKey('');
     setDlgOpen(true);
   };
@@ -119,6 +124,8 @@ export default function SettingsPanel() {
       toast.error('Укажи имя модели');
       return;
     }
+    // активная модель всегда первой в сохранённом списке, без дублей, не более 12
+    const models = Array.from(new Set([pModel.trim(), ...pModels.map((m) => m.trim())].filter(Boolean))).slice(0, 12);
     if (editingId) {
       // при редактировании пустой ключ означает «оставить прежний»
       const prev = providers.find((x) => x.id === editingId);
@@ -127,6 +134,7 @@ export default function SettingsPanel() {
         type: pType,
         baseUrl: pUrl.trim().replace(/\/+$/, ''),
         model: pModel.trim(),
+        models,
         apiKey: pKey.trim() || prev?.apiKey || '',
       });
       toast.success('Провайдер обновлён');
@@ -137,6 +145,7 @@ export default function SettingsPanel() {
         baseUrl: pUrl.trim().replace(/\/+$/, ''),
         apiKey: pKey.trim(),
         model: pModel.trim(),
+        models,
       });
       toast.success('Провайдер добавлен');
     }
@@ -144,6 +153,7 @@ export default function SettingsPanel() {
     setEditingId(null);
     setPName('');
     setPKey('');
+    setPModels([]);
   };
 
   const runTest = async (id: string) => {
@@ -279,6 +289,48 @@ export default function SettingsPanel() {
                 <div>
                   <Label className="mb-1.5 block">Модель</Label>
                   <Input value={pModel} onChange={(e) => setPModel(e.target.value)} placeholder="gpt-4o-mini" />
+                  {pModels.length > 0 && (
+                    <div className="mt-2">
+                      <div className="flex flex-wrap gap-1.5">
+                        {pModels.map((m) => {
+                          const active = m === pModel.trim();
+                          return (
+                            <span
+                              key={m}
+                              className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] ${
+                                active
+                                  ? 'border-primary/60 bg-primary/20 text-primary'
+                                  : 'border-border text-muted-foreground'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                className="max-w-[220px] truncate"
+                                onClick={() => setPModel(m)}
+                                title="Сделать модель активной"
+                              >
+                                {m}
+                              </button>
+                              {!active && (
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground hover:text-destructive"
+                                  onClick={() => setPModels(pModels.filter((x) => x !== m))}
+                                  aria-label={`Убрать модель ${m} из списка`}
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              )}
+                            </span>
+                          );
+                        })}
+                      </div>
+                      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        Нажми на название — модель станет активной. Новое имя в поле выше при сохранении
+                        добавится в список (до 12 моделей).
+                      </p>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <Label className="mb-1.5 block">
@@ -324,6 +376,7 @@ export default function SettingsPanel() {
                     <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{p.baseUrl}</p>
                     <p className="truncate text-xs text-muted-foreground" title={p.model}>
                       модель: <span className="font-mono">{p.model}</span>
+                      {(p.models?.length ?? 0) > 1 && ` · в списке ещё ${(p.models?.length ?? 0) - 1}`}
                     </p>
                     {/* действия — отдельной строкой снизу: статус/выбор слева, иконки справа */}
                     <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-border/60 pt-2.5">

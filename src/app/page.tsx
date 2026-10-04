@@ -39,7 +39,16 @@ export default function Home() {
         {activeTab === 'home' && <HomePanel />}
         {activeTab === 'map' && <MapPanel />}
         {activeTab === 'maps' && <MapsPanel />}
-        {activeTab === 'import' && <ImportPanel />}
+        {/*
+          Импорт НЕ выгружается при уходе на другую вкладку, а скрывается CSS:
+          долгие операции (разбор на атомы, OCR PDF, генерация задач) продолжают
+          идти в фоне, и при возврате виден актуальный прогресс, а не сброшенная
+          форма. PDF-документ при этом живёт, пока пользователь работает с ним
+          (закрывается вручную или по завершении OCR).
+        */}
+        <div className={activeTab === 'import' ? '' : 'hidden'}>
+          <ImportPanel />
+        </div>
         {activeTab === 'settings' && <SettingsPanel />}
       </main>
       <BottomNav />
