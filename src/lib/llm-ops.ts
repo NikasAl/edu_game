@@ -21,6 +21,79 @@ const SYSTEM = `Ты — методист-редактор образовате�
 
 ФОРМУЛЫ: пиши математические выражения в LaTeX — строчные формулы оборачивай в $...$ (например: $v(t) = 2at$), выключные/отдельной строкой — в $$...$$. Степени и индексы — только LaTeX-синтаксисом ($x^2$, $t_0$), без юникод-надстрочных знаков (², ₀) ВНУТРИ формул. Обратные слэши в командах LaTeX (\\frac, \\cdot, \\int) сохраняй как есть. Вне формул — обычный текст. В поля, которые обрабатывает решатель (expr, value, alts), LaTeX НЕ писать — там чистый синтаксис решателя.`;
 
+// ============ 0. JSON-запрос с авто-повтором при ответе «невпопад» ============
+
+/**
+ * Бесплатные прокси иногда отвечают на JSON-промпт «невпопад» и без ошибки
+ * сервера: в ответе проза, markdown-картинка (реальный случай из журнала:
+ * «Here is your generated image: …» от top-tools-ai) или вообще не тот
+ * JSON. extractJson падает, и раньше это роняло всю операцию — например,
+ * многофрагментный импорт после десятков минут работы. Повторный запрос
+ * почти всегда даёт нормальный ответ, поэтому все JSON-операции идут через
+ * эту обёртку: до JSON_ATTEMPTS попыток с паузой и подсказкой модели
+ * «верни только JSON». Сетевые и HTTP-ошибки не трогаем — у callLLM
+ * собственные повторы, наверх они пробрасываются сразу.
+ */
+const JSON_ATTEMPTS = 3;
+
+/** Повторяем только «ответ не разобрать / ответ пуст» — остальное сразу наверх */
+function isRetryableAnswerError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.startsWith('LLM вернул некорректный JSON') ||
+    msg.startsWith('LLM вернул пустой ответ') ||
+    msg.startsWith('Модель вернула пустой ответ')
+  );
+}
+
+async function callLLMJson<T>(
+  provider: LLMProvider,
+  messages: LLMMessage[],
+  options: {
+    op: string;
+    temperature?: number;
+    maxTokens?: number;
+    /** Проверка структуры ответа: вернуть текст проблемы или null, если всё в порядке */
+    validate: (parsed: T) => string | null;
+  }
+): Promise<T> {
+  let lastProblem = '';
+  for (let attempt = 1; attempt <= JSON_ATTEMPTS; attempt++) {
+    const attemptMessages: LLMMessage[] =
+      attempt === 1
+        ? messages
+        : [
+            ...messages,
+            {
+              role: 'user',
+              content: `Предыдущий ответ не подошёл: ${lastProblem} Верни ТОЛЬКО валидный JSON в запрошенном формате — без пояснений, без markdown-заборов и без текста вокруг.`,
+            },
+          ];
+    let parsed: T;
+    try {
+      const res = await callLLM(provider, attemptMessages, {
+        temperature: options.temperature,
+        maxTokens: options.maxTokens,
+        op: options.op,
+      });
+      parsed = extractJson<T>(res.content);
+    } catch (err) {
+      if (!isRetryableAnswerError(err)) throw err; // сетевые/HTTP — сразу наверх
+      lastProblem = err instanceof Error ? err.message : String(err);
+      if (attempt >= JSON_ATTEMPTS) break; // попытки исчерпаны — финальная ошибка ниже
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+      continue;
+    }
+    const problem = options.validate(parsed);
+    if (problem === null) return parsed;
+    lastProblem = `JSON не той структуры (${problem}).`;
+    if (attempt < JSON_ATTEMPTS) await new Promise((r) => setTimeout(r, 2000 * attempt));
+  }
+  throw new Error(
+    `Модель ${JSON_ATTEMPTS} раза подряд ответила не по формату: ${lastProblem} Попробуй ещё раз позже или выбери другую модель; полный ответ модели — в Настройки → Журнал LLM.`
+  );
+}
+
 // ============ 1. Ингест: текст → атомы идей ============
 
 const INGEST_PROMPT = `Разбери учебный материал и выдели атомарные идеи (атомы).
@@ -66,12 +139,16 @@ export async function ingestSplitIntoIdeas(
       content: `${INGEST_PROMPT}${partNote ? `\n\n${partNote}` : ''}\n\nНазвание материала: «${materialTitle}»\n\nМАТЕРИАЛ:\n${sourceText.slice(0, 24000)}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 50000, op: 'ingest' });
-  const parsed = extractJson<IngestResult>(res.content);
-  if (!Array.isArray(parsed.atoms) || parsed.atoms.length === 0) {
-    throw new Error('LLM не вернул ни одного атома');
-  }
-  return parsed;
+  return callLLMJson<IngestResult>(provider, messages, {
+    op: 'ingest',
+    temperature: 0.2,
+    maxTokens: 50000,
+    validate: (p) => {
+      if (!Array.isArray(p.atoms) || p.atoms.length === 0) return 'массив atoms пуст или отсутствует';
+      if (!Array.isArray(p.regions)) return 'массив regions отсутствует';
+      return null;
+    },
+  });
 }
 
 // ============ 1б. Ингест с детализацией: длинный текст → фрагменты ============
@@ -271,12 +348,13 @@ export async function genTasksForAtom(
       }`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 50000, op: 'gen_tasks' });
-  const parsed = extractJson<GeneratedTasks>(res.content);
-  if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
-    throw new Error('LLM не вернул задачи');
-  }
-  return parsed;
+  return callLLMJson<GeneratedTasks>(provider, messages, {
+    op: 'gen_tasks',
+    temperature: 0.4,
+    maxTokens: 50000,
+    validate: (p) =>
+      Array.isArray(p.tasks) && p.tasks.length > 0 ? null : 'массив tasks пуст или отсутствует',
+  });
 }
 
 // ============ 3. Проверка фейнмановского объяснения ============
@@ -306,8 +384,15 @@ export async function gradeFeynmanLLM(
       content: `${FEYNMAN_PROMPT}\n\nИдея: «${node.title}»\nЭталонная формулировка: ${node.formulation}\nКлючевые термины: ${node.keyTerms.join(', ')}\nПример: ${node.example}\n\nОБЪЯСНЕНИЕ СТУДЕНТА:\n${userAnswer}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 4000, op: 'grade_feynman' });
-  const parsed = extractJson<FeynmanGrade>(res.content);
+  const parsed = await callLLMJson<FeynmanGrade>(provider, messages, {
+    op: 'grade_feynman',
+    temperature: 0.2,
+    maxTokens: 4000,
+    validate: (p) =>
+      p.accuracy !== undefined || p.verdict !== undefined || p.feedback !== undefined
+        ? null
+        : 'нет полей оценки (accuracy/verdict/feedback)',
+  });
   const accuracy = clampInt(parsed.accuracy, 0, 2);
   const completeness = clampInt(parsed.completeness, 0, 2);
   const ownWords = clampInt(parsed.ownWords, 0, 1);
@@ -403,8 +488,15 @@ export async function validateOwnTaskLLM(
       content: `${OWN_TASK_PROMPT}\n\nИдея: «${node.title}»\nФормулировка идеи: ${node.formulation}\n\nЗАДАЧА СТУДЕНТА:\n${userTask}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.2, maxTokens: 4000, op: 'own_task' });
-  const parsed = extractJson<OwnTaskVerdict>(res.content);
+  const parsed = await callLLMJson<OwnTaskVerdict>(provider, messages, {
+    op: 'own_task',
+    temperature: 0.2,
+    maxTokens: 4000,
+    validate: (p) =>
+      p.onTopic !== undefined || p.solvable !== undefined || p.feedback !== undefined || p.answer !== undefined
+        ? null
+        : 'нет полей вердикта (onTopic/solvable/feedback)',
+  });
   const onTopic = Boolean(parsed.onTopic);
   const solvable = Boolean(parsed.solvable);
   return {
@@ -579,8 +671,15 @@ export async function checkTaskLLM(
       content: `${CHECK_TASK_PROMPT}\n\nИдея: «${node.title}» — ${node.formulation}\n\nТип задачи: ${task.type}\nШаблон условия: ${task.prompt}${valuesNote}\nЭкземпляр для проверки: ${sample.renderedPrompt}\nЭталонный ответ: ${expected}\n\nПодсказки:\n${task.hints.map((h, i) => `${i + 1}. ${h}`).join('\n') || '(нет)'}\n\nРазбор:\n${task.explanation || '(нет)'}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.1, maxTokens: 4000, op: 'check_task' });
-  const parsed = extractJson<CheckReport>(res.content);
+  const parsed = await callLLMJson<CheckReport>(provider, messages, {
+    op: 'check_task',
+    temperature: 0.1,
+    maxTokens: 4000,
+    validate: (p) =>
+      p.ok !== undefined || Array.isArray(p.problems) || p.feedback !== undefined
+        ? null
+        : 'нет полей отчёта (ok/problems/feedback)',
+  });
   return {
     ok: Boolean(parsed.ok),
     problems: Array.isArray(parsed.problems) ? parsed.problems.filter((p) => typeof p === 'string' && p.trim()).slice(0, 8) : [],
@@ -614,8 +713,15 @@ export async function checkIdeaLLM(
       content: `${CHECK_IDEA_PROMPT}\n\nНазвание: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\nЧастая ошибка: ${node.misconception || '(не указана)'}\nВопрос Фейнмана: ${node.feynmanQuestion}\nКлючевые термины: ${node.keyTerms.join(', ') || '(нет)'}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.1, maxTokens: 3000, op: 'check_idea' });
-  const parsed = extractJson<CheckReport>(res.content);
+  const parsed = await callLLMJson<CheckReport>(provider, messages, {
+    op: 'check_idea',
+    temperature: 0.1,
+    maxTokens: 3000,
+    validate: (p) =>
+      p.ok !== undefined || Array.isArray(p.problems) || p.feedback !== undefined
+        ? null
+        : 'нет полей отчёта (ok/problems/feedback)',
+  });
   return {
     ok: Boolean(parsed.ok),
     problems: Array.isArray(parsed.problems) ? parsed.problems.filter((p) => typeof p === 'string' && p.trim()).slice(0, 8) : [],
@@ -660,12 +766,15 @@ export async function fixTaskLLM(
       content: `${FIX_TASK_PROMPT}\n\nИдея: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\n\nЗАДАЧА (тип ${task.type}):\nУсловие: ${task.prompt}\n${spec.kind === 'numeric' && task.params?.length ? `Параметры: ${JSON.stringify(task.params)}\n` : ''}${answerLine}\nПодсказки: ${task.hints.join(' | ') || '(нет)'}\nРазбор: ${task.explanation || '(нет)'}\n${problems?.length ? `\nНАЙДЕННЫЕ ПРОБЛЕМЫ (устрани их):\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.3, maxTokens: 50000, op: 'fix_task' });
-  const parsed = extractJson<GeneratedTasks['tasks'][number]>(res.content);
-  if (!parsed.prompt || (!parsed.explanation && !parsed.expr && !parsed.value && !parsed.options)) {
-    throw new Error('LLM вернул неполное исправление задачи');
-  }
-  return parsed;
+  return callLLMJson<GeneratedTasks['tasks'][number]>(provider, messages, {
+    op: 'fix_task',
+    temperature: 0.3,
+    maxTokens: 50000,
+    validate: (p) =>
+      p.prompt && (p.explanation || p.expr || p.value || p.options)
+        ? null
+        : 'нет условия задачи (prompt) или ответа (explanation/expr/value/options)',
+  });
 }
 
 export interface FixedIdea {
@@ -701,9 +810,12 @@ export async function fixIdeaLLM(
       content: `${FIX_IDEA_PROMPT}\n\nНазвание: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\nЧастая ошибка: ${node.misconception || '(не указана)'}\nВопрос Фейнмана: ${node.feynmanQuestion}\nКлючевые термины: ${node.keyTerms.join(', ') || '(нет)'}\n${problems?.length ? `\nНАЙДЕННЫЕ ПРОБЛЕМЫ (устрани их):\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`,
     },
   ];
-  const res = await callLLM(provider, messages, { temperature: 0.3, maxTokens: 8000, op: 'fix_idea' });
-  const parsed = extractJson<FixedIdea>(res.content);
-  if (!parsed.formulation || !parsed.example) throw new Error('LLM вернул неполное исправление идеи');
+  const parsed = await callLLMJson<FixedIdea>(provider, messages, {
+    op: 'fix_idea',
+    temperature: 0.3,
+    maxTokens: 8000,
+    validate: (p) => (p.formulation && p.example ? null : 'нет полей formulation/example'),
+  });
   return {
     title: parsed.title || node.title,
     formulation: parsed.formulation,
