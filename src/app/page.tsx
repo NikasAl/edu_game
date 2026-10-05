@@ -6,6 +6,7 @@ import BottomNav from '@/components/app/BottomNav';
 import HomePanel from '@/components/app/HomePanel';
 import MapPanel from '@/components/app/MapPanel';
 import MapsPanel from '@/components/app/MapsPanel';
+import StatsPanel from '@/components/app/StatsPanel';
 import ImportPanel from '@/components/app/ImportPanel';
 import SettingsPanel from '@/components/app/SettingsPanel';
 import NodeView from '@/components/app/NodeView';
@@ -39,6 +40,7 @@ export default function Home() {
         {activeTab === 'home' && <HomePanel />}
         {activeTab === 'map' && <MapPanel />}
         {activeTab === 'maps' && <MapsPanel />}
+        {activeTab === 'stats' && <StatsPanel />}
         {/*
           Импорт НЕ выгружается при уходе на другую вкладку, а скрывается CSS:
           долгие операции (разбор на атомы, OCR PDF, генерация задач) продолжают

@@ -269,7 +269,7 @@ export interface IngestResult {
 
 // ============ Приложение ============
 
-export type TabId = 'home' | 'map' | 'maps' | 'import' | 'settings';
+export type TabId = 'home' | 'map' | 'maps' | 'stats' | 'import' | 'settings';
 
 export interface MetaRec {
   key: string;

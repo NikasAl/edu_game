@@ -1,6 +1,6 @@
 'use client';
 
-import { FolderTree, Home, Map, PlusCircle, Settings } from 'lucide-react';
+import { BarChart3, FolderTree, Home, Map, PlusCircle, Settings } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import type { TabId } from '@/lib/types';
 
@@ -8,6 +8,7 @@ const TABS: { id: TabId; label: string; icon: React.ComponentType<{ className?: 
   { id: 'home', label: 'Главная', icon: Home },
   { id: 'map', label: 'Карта', icon: Map },
   { id: 'maps', label: 'Карты', icon: FolderTree },
+  { id: 'stats', label: 'Прогресс', icon: BarChart3 },
   { id: 'import', label: 'Импорт', icon: PlusCircle },
   { id: 'settings', label: 'Настройки', icon: Settings },
 ];
@@ -21,7 +22,7 @@ export default function BottomNav() {
       className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80"
       aria-label="Основная навигация"
     >
-      <div className="mx-auto grid max-w-lg grid-cols-5 pb-[env(safe-area-inset-bottom)]">
+      <div className="mx-auto grid max-w-lg grid-cols-6 pb-[env(safe-area-inset-bottom)]">
         {TABS.map(({ id, label, icon: Icon }) => {
           const active = activeTab === id;
           return (
