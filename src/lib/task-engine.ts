@@ -44,8 +44,11 @@ export function instantiateTask(task: Task): TaskInstance {
     }
   } else if (spec.kind === 'exact') {
     answer = spec.value;
-  } else {
+  } else if (spec.kind === 'choice') {
     answer = String(spec.correctIndex);
+  } else {
+    // essay: локального эталона нет — проверка LLM/локальной рубрикой в NodeView
+    answer = '';
   }
   return answerError ? { taskId: task.id, values, renderedPrompt, answer, answerError } : { taskId: task.id, values, renderedPrompt, answer };
 }
@@ -55,8 +58,13 @@ export interface CheckResult {
   correctAnswer?: string; // показывается после неверного ответа (опция)
 }
 
-/** Проверить ответ пользователя на экземпляр задачи */
+/** Проверить ответ пользователя на экземпляр задачи.
+ *  Для essay эвристика не применяется — возвращаем fail-заглушку;
+ *  реальная проверка (LLM/локальная рубрика) идёт в NodeView до этого вызова. */
 export function checkAnswer(instance: TaskInstance, spec: AnswerSpec, userInput: string): CheckResult {
+  if (spec.kind === 'essay') {
+    return { verdict: 'fail', correctAnswer: undefined };
+  }
   if (spec.kind === 'numeric') {
     if (instance.answerError) return { verdict: 'fail' }; // сломанная формула: ответ не может быть верным
     const num = parseUserNumber(userInput);
@@ -106,6 +114,9 @@ export function taskProblems(task: Task): string[] {
     }
   } else if (spec.kind === 'exact') {
     if (!String(spec.value ?? '').trim()) problems.push('Не заполнен эталонный ответ');
+  } else if (spec.kind === 'essay') {
+    const exp = (spec.expectation ?? []).filter((e) => String(e).trim());
+    if (exp.length < 2) problems.push('Не заданы ключевые пункты ожидаемого ответа (нужно минимум 2)');
   }
   return problems;
 }

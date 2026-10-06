@@ -100,6 +100,36 @@ export interface Region {
 }
 
 /**
+ * Тип идеи атома — вход роутера заданий: от него зависит,
+ * какими форматами задач проверять атом.
+ */
+export type AtomKind =
+  | 'fact' // изолированный факт/утверждение
+  | 'date' // событие, дата, период
+  | 'person' // персоналия: кто это, что сделал
+  | 'concept' // понятие, определение, закономерность без вычислений
+  | 'procedure' // метод, алгоритм, последовательность действий
+  | 'formula' // количественная закономерность, вычисление
+  | 'opinion'; // оценка, аргументация «почему так»
+
+export const ATOM_KIND_META: Record<AtomKind, { label: string }> = {
+  fact: { label: 'Факт' },
+  date: { label: 'Дата' },
+  person: { label: 'Персоналия' },
+  concept: { label: 'Понятие' },
+  procedure: { label: 'Метод' },
+  formula: { label: 'Формула' },
+  opinion: { label: 'Оценка' },
+};
+
+/** Привести значение LLM/БД к AtomKind (undefined — мусор/не задано) */
+export function normalizeAtomKind(v: unknown): AtomKind | undefined {
+  return typeof v === 'string' && Object.prototype.hasOwnProperty.call(ATOM_KIND_META, v)
+    ? (v as AtomKind)
+    : undefined;
+}
+
+/**
  * Атом идеи — главная сущность.
  * Атомарность: формулировка в 1 предложение + 1 пример + проверяемый вопрос.
  */
@@ -114,6 +144,7 @@ export interface IdeaNode {
   sourceRef?: string; // цитата/ссылка на источник
   feynmanQuestion: string; // вопрос для фейнмановского объяснения
   keyTerms: string[]; // ключевые термины (для локального оценщика и подсказок)
+  atomKind?: AtomKind; // тип идеи (роутер заданий; у старых атомов может не быть)
   orderIndex: number;
   createdAt: Date;
 }
@@ -132,7 +163,7 @@ export interface IdeaEdge {
 
 // ============ Задания ============
 
-export type TaskType = 'numeric' | 'exact' | 'choice';
+export type TaskType = 'numeric' | 'exact' | 'choice' | 'essay';
 
 /** Параметр шаблона задачи: список допустимых значений для рандомизации */
 export interface TaskParam {
@@ -143,7 +174,8 @@ export interface TaskParam {
 export type AnswerSpec =
   | { kind: 'numeric'; expr: string; tolerance?: number } // expr — выражение от параметров
   | { kind: 'exact'; value: string; alts?: string[] }
-  | { kind: 'choice'; options: string[]; correctIndex: number };
+  | { kind: 'choice'; options: string[]; correctIndex: number }
+  | { kind: 'essay'; expectation: string[] }; // открытый ответ: ключевые пункты полного ответа
 
 export interface Task {
   id: string;
@@ -237,6 +269,14 @@ export interface FeynmanGrade {
   feedback: string;
 }
 
+/** Результат проверки открытого ответа (essay-задача) */
+export interface EssayGrade {
+  verdict: 'pass' | 'fail';
+  score: number; // 0..1 — покрытие ключевых пунктов
+  missed: string[]; // нераскрытые пункты (для обратной связи)
+  feedback: string;
+}
+
 /** Результат проверки «своей задачи» */
 export interface OwnTaskVerdict {
   verdict: 'pass' | 'fail';
@@ -254,6 +294,7 @@ export interface ParsedAtom {
   sourceQuote?: string;
   feynmanQuestion: string;
   keyTerms: string[];
+  atomKind?: AtomKind; // тип идеи (для роутера заданий)
   regionIndex: number;
   needs?: { title: string; kind: EdgeKind }[]; // от чего зависит
 }

@@ -54,6 +54,7 @@ import {
   type PdfDoc,
 } from '@/lib/extract';
 import type { EdgeKind, IdeaEdge, IdeaNode, LLMProvider, Material, Region, Task } from '@/lib/types';
+import { normalizeAtomKind } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 
 type Phase = 'input' | 'extract' | 'pdfOcr' | 'parsing' | 'review' | 'tasks';
@@ -460,6 +461,7 @@ export default function ImportPanel() {
         sourceRef: a.sourceQuote || undefined,
         feynmanQuestion: a.feynmanQuestion || `Объясни своими словами: ${a.formulation}`,
         keyTerms: Array.isArray(a.keyTerms) ? a.keyTerms.slice(0, 6) : [],
+        atomKind: normalizeAtomKind(a.atomKind), // мусор от LLM → undefined (роутер классифицирует сам)
         orderIndex: i,
         createdAt: now,
       }));
@@ -501,7 +503,13 @@ export default function ImportPanel() {
         try {
           const gen = await genTasksForAtom(
             activeProvider!,
-            { title: nodes[i].title, formulation: nodes[i].formulation, example: nodes[i].example },
+            {
+              title: nodes[i].title,
+              formulation: nodes[i].formulation,
+              example: nodes[i].example,
+              atomKind: nodes[i].atomKind,
+              misconception: nodes[i].misconception,
+            },
             ingestResult.atoms[i].sourceQuote
           );
           if (gen.feynmanQuestion) {

@@ -341,6 +341,7 @@ const TYPE_LABEL: Record<TaskType, string> = {
   numeric: 'числовая',
   exact: 'точный ответ',
   choice: 'выбор варианта',
+  essay: 'открытый ответ',
 };
 
 function TasksEditor({
@@ -373,7 +374,13 @@ function TasksEditor({
     try {
       const gen = await genTasksForAtom(
         provider,
-        { title: node.title, formulation: node.formulation, example: node.example },
+        {
+          title: node.title,
+          formulation: node.formulation,
+          example: node.example,
+          atomKind: node.atomKind,
+          misconception: node.misconception,
+        },
         node.sourceRef
       );
       let i = tasks.length;
@@ -534,7 +541,8 @@ function makeSampleInstance(t: Task): TaskInstance {
   let answer: number | string = '';
   if (spec.kind === 'numeric') answer = evalExpr(spec.expr, values);
   else if (spec.kind === 'exact') answer = spec.value;
-  else answer = String(spec.correctIndex);
+  else if (spec.kind === 'choice') answer = String(spec.correctIndex);
+  else answer = spec.expectation.join('; ');
   return { taskId: t.id, values, renderedPrompt, answer };
 }
 
@@ -571,6 +579,9 @@ function TaskEditorCard({
   const [correctIndex, setCorrectIndex] = useState(
     task.answerSpec.kind === 'choice' ? task.answerSpec.correctIndex : 0
   );
+  const [expectationText, setExpectationText] = useState(
+    task.answerSpec.kind === 'essay' ? task.answerSpec.expectation.join('\n') : ''
+  );
   const [hint1, setHint1] = useState(task.hints[0] ?? '');
   const [hint2, setHint2] = useState(task.hints[1] ?? '');
   const [explanation, setExplanation] = useState(task.explanation);
@@ -593,6 +604,13 @@ function TaskEditorCard({
         params: {},
       };
     }
+    if (type === 'essay') {
+      const expectation = expectationText.split('\n').map((s) => s.trim()).filter(Boolean);
+      return {
+        spec: { kind: 'essay', expectation } as AnswerSpec,
+        params: {},
+      };
+    }
     const options = optionsText.split('\n').map((s) => s.trim()).filter(Boolean);
     return {
       spec: {
@@ -602,7 +620,7 @@ function TaskEditorCard({
       } as AnswerSpec,
       params: {},
     };
-  }, [type, expr, tolerance, paramsJson, value, alts, optionsText, correctIndex]);
+  }, [type, expr, tolerance, paramsJson, value, alts, optionsText, correctIndex, expectationText]);
 
   /** Черновик задачи + строка ошибки валидации (null — ок) */
   const draft = useMemo(() => {
@@ -621,6 +639,9 @@ function TaskEditorCard({
       }
     } else if (type === 'exact') {
       if (!value.trim()) problem.push('Заполни эталонный ответ');
+    } else if (type === 'essay') {
+      const exp = spec.spec.kind === 'essay' ? spec.spec.expectation : [];
+      if (exp.length < 2) problem.push('Укажи минимум 2 ключевых пункта полного ответа (по одному в строке)');
     } else {
       const opts = spec.spec.kind === 'choice' ? spec.spec.options : [];
       if (opts.length < 2) problem.push('Минимум 2 варианта ответа');
@@ -659,6 +680,10 @@ function TaskEditorCard({
       return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100).replace('.', ',');
     }
     if (draft.task.answerSpec.kind === 'exact') return String(preview.answer);
+    if (draft.task.answerSpec.kind === 'essay') {
+      const exp = draft.task.answerSpec.expectation;
+      return exp.length > 0 ? `${exp.length} ключевых пунктов — проверяет ИИ` : '—';
+    }
     const opt = draft.task.answerSpec.options[Number(preview.answer)];
     return opt ? `«${opt}»` : '—';
   })();
@@ -670,6 +695,8 @@ function TaskEditorCard({
     } else if (t === 'choice') {
       if (!optionsText.trim()) setOptionsText('Вариант 1\nВариант 2\nВариант 3');
       setCorrectIndex(0);
+    } else if (t === 'essay') {
+      if (!expectationText.trim()) setExpectationText('Ключевой пункт ответа 1\nКлючевой пункт ответа 2\nКлючевой пункт ответа 3');
     }
   };
 
@@ -745,6 +772,8 @@ function TaskEditorCard({
       } else if (gen.type === 'exact') {
         setValue(gen.value ?? '');
         setAlts((gen.alts ?? []).join('; '));
+      } else if (gen.type === 'essay') {
+        setExpectationText((gen.expectation ?? []).join('\n'));
       } else {
         setOptionsText((gen.options ?? []).join('\n'));
         setCorrectIndex(Math.max(0, gen.correctIndex ?? 0));
@@ -812,6 +841,7 @@ function TaskEditorCard({
                   <SelectItem value="numeric">Числовая (параметрическая)</SelectItem>
                   <SelectItem value="exact">Точный ответ</SelectItem>
                   <SelectItem value="choice">Выбор варианта</SelectItem>
+                  <SelectItem value="essay">Открытый ответ (проверяет ИИ)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -846,6 +876,13 @@ function TaskEditorCard({
                   <Input value={alts} onChange={(e) => setAlts(e.target.value)} />
                 </div>
               </>
+            )}
+
+            {type === 'essay' && (
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs text-muted-foreground">Ключевые пункты полного ответа (по одному в строке) — по ним ИИ зачитывает ответ</Label>
+                <Textarea value={expectationText} onChange={(e) => setExpectationText(e.target.value)} rows={4} className="resize-none" />
+              </div>
             )}
 
             {type === 'choice' && (

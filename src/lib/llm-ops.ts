@@ -7,6 +7,8 @@
 import { callLLM, type LLMMessage } from './llm-client';
 import { extractJson } from './llm-json';
 import type {
+  AtomKind,
+  EssayGrade,
   FeynmanGrade,
   IngestResult,
   LLMProvider,
@@ -14,7 +16,9 @@ import type {
   ParsedAtom,
   Task,
   TaskInstance,
+  TaskType,
 } from './types';
+import { normalizeAtomKind } from './types';
 import { normalizeText } from './safeMath';
 
 const SYSTEM = `Ты — методист-редактор образовательных материалов. Ты аккуратен, соблюдаешь запрошенный формат JSON и пишешь по-русски. Не выдумывай факты, которых нет в материале; если чего-то не хватает — опирайся на общепринятые школьные/вузовские формулировки.
@@ -103,6 +107,7 @@ const INGEST_PROMPT = `Разбери учебный материал и выд�
 - на главу обычно 4–12 атомов; не дроби сильнее, не склеивай разные идеи;
 - для каждого атома укажи, от каких других атомов он зависит (needs): hard = без этого понять нельзя, soft = помогает;
 - зависимости должны образовывать ациклический граф;
+- atomKind — тип идеи, ровно одно значение: "fact" (изолированный факт), "date" (событие/дата/период), "person" (персоналия), "concept" (понятие/закономерность без вычислений), "procedure" (метод/алгоритм/последовательность действий), "formula" (количественная закономерность/формула/вычисление), "opinion" (оценка/аргументация «почему так»);
 - 1–3 региона (главы/раздела), атомы распределены по регионам;
 - feynmanQuestion — вопрос, требующий объяснения идеи СВОИМИ словами с примером;
 - sourceQuote — короткая цитата из материала, к которой привязан атом (если она есть).
@@ -119,6 +124,7 @@ const INGEST_PROMPT = `Разбери учебный материал и выд�
     "sourceQuote": "цитата из материала (или пусто)",
     "feynmanQuestion": "вопрос для объяснения своими словами",
     "keyTerms": ["3-6 ключевых терминов идеи"],
+    "atomKind": "concept",
     "needs": [{"title": "название другого атома", "kind": "hard|soft"}]
   }]
 }`;
@@ -282,46 +288,122 @@ export async function ingestSplitIntoIdeasChunked(
   return merged;
 }
 
-// ============ 2. Генерация задач для атома ============
+// ============ 2. Генерация задач для атома (роутер типов) ============
 
-const TASKS_PROMPT = `Создай для атома знания 2 проверяемых задания.
+/**
+ * Роутер заданий: для каждого типа атома — своя пара форматов.
+ * Раньше промпт требовал «задача 1 — всегда числовая параметрическая»,
+ * из-за чего атомам истории/литературы навязывалась арифметика.
+ */
+const TASK_PLANS: Record<AtomKind, { first: TaskType; second: TaskType; note: string }> = {
+  formula: {
+    first: 'numeric',
+    second: 'choice',
+    note: 'числовая задача на применение формулы/закона + выбор варианта, где дистракторы — типичные ошибки в вычислении или интерпретации',
+  },
+  procedure: {
+    first: 'numeric',
+    second: 'exact',
+    note: 'если к методу естественно применимы числа — задача на применение метода; если чисел нет (например, порядок действий в истории или биологии) — вместо numeric сделай exact о ключевом шаге; вторая задача — точный короткий ответ о важном шаге, условии применения или результате метода',
+  },
+  concept: {
+    first: 'choice',
+    second: 'essay',
+    note: 'выбор варианта с дистракторами — правдоподобными заблуждениями (если известна типичная ошибка — используй её) + открытый вопрос «объясни своими словами, почему/как/чем отличается...», ответ должен раскрывать суть идеи',
+  },
+  fact: {
+    first: 'exact',
+    second: 'choice',
+    note: 'точный короткий ответ — сам факт + выбор варианта с правдоподобными неверными вариантами этого факта',
+  },
+  date: {
+    first: 'exact',
+    second: 'choice',
+    note: 'точный ответ — дата/событие/период + выбор варианта (например, «какое событие произошло раньше» или соотнесение события и периода)',
+  },
+  person: {
+    first: 'exact',
+    second: 'choice',
+    note: 'точный ответ — кто это или что сделал + выбор варианта о заслугах/фактах, связанных с этим человеком',
+  },
+  opinion: {
+    first: 'essay',
+    second: 'choice',
+    note: 'открытый вопрос «аргументируй/объясни почему» с ожиданием ключевых пунктов аргументации + выбор варианта о том, какой аргумент поддерживает или опровергает утверждение',
+  },
+};
 
-Требования:
-- задача 1: числовая, ПАРАМЕТРИЧЕСКАЯ — придумай 2–4 параметра с 3–4 допустимыми значениями каждый; ответ должен выражаться формулой от параметров; ВАЖНО: поле expr — чистый синтаксис решателя: только числа, латинские имена параметров, + - * / ^, скобки и функции sqrt/abs/min/max/round/ln/log/floor/ceil; НЕ LaTeX; НЕ используй символы %, ×, ÷, √, π и запятые (проценты пиши как «x/100», корень — sqrt(x), число пи — pi);
-- текст задачи (prompt) может содержать формулы в LaTeX вида $...$ и подстановки вида {{имя_параметра}};
-- задача 2: с выбором варианта (3 опции) ИЛИ точным коротким текстовым ответом;
-- answers должны быть вычислимы/однозначны; числовой ответ — целое или с <=2 знаками после запятой;
+const TASK_FORMATS_DOC = `Форматы заданий (поля JSON):
+- numeric — числовая параметрическая: {"type":"numeric","prompt":"...","params":[{"name":"a","choices":[1,2,3]}],"expr":"формула ответа от параметров","hints":["...","..."],"explanation":"..."}; ВАЖНО: expr — чистый синтаксис решателя: только числа, латинские имена параметров, + - * / ^, скобки и функции sqrt/abs/min/max/round/ln/log/floor/ceil; НЕ LaTeX; НЕ используй символы %, ×, ÷, √, π и запятые (проценты — «x/100», корень — sqrt(x), число пи — pi);
+- exact — точный короткий ответ: {"type":"exact","prompt":"...","value":"эталон","alts":["варианты написания"],"hints":[...],"explanation":"..."}; ответ однозначен и краток (слово, имя, дата, число);
+- choice — выбор варианта: {"type":"choice","prompt":"...","options":["А","Б","В"],"correctIndex":0,"hints":[...],"explanation":"..."}; ровно одна верная опция, дистракторы — правдоподобные ошибки;
+- essay — открытый развёрнутый ответ: {"type":"essay","prompt":"...","expectation":["ключевой пункт 1","ключевой пункт 2","ключевой пункт 3"],"hints":[...],"explanation":"..."}; expectation — 3–5 ключевых пунктов ПОЛНОГО ответа, каждый — одна короткая содержательная фраза; вопрос должен требовать рассуждения/объяснения, а не одного слова.`;
+
+const TASKS_COMMON_RULES = `Общие требования:
+- текст задания (prompt) может содержать формулы в LaTeX вида $...$ и подстановки вида {{имя_параметра}} (подстановки — только для numeric);
+- числовые ответы — целые или с <=2 знаками после запятой; answers должны быть вычислимы/однозначны;
 - hints: 2 подсказки (1-я — направление, 2-я — шаг решения), explanation — полный разбор (можно с LaTeX);
-- всё по-русски, в рамках идеи атома.
+- всё по-русски, в рамках идеи атома; задания проверяют именно эту идею, а не смежные темы.`;
+
+function buildTasksPrompt(kind: AtomKind): string {
+  const plan = TASK_PLANS[kind];
+  return `Создай для атома знания 2 проверяемых задания.
+
+Форматы заданий:
+${TASK_FORMATS_DOC}
+
+${TASKS_COMMON_RULES}
+
+ПЛАН для этого атома (тип идеи: ${kind}):
+- задание 1 — формат ${plan.first}: ${plan.note};
+- задание 2 — формат ${plan.second}.
+Оба задания в указанных форматах; не заменяй формат другим без веской причины.
 
 Верни СТРОГО JSON:
 {
   "feynmanQuestion": "вопрос для объяснения своими словами (если удалось уточнить — иначе повтори исходный)",
-  "tasks": [
-    {
-      "type": "numeric",
-      "prompt": "текст задачи с подстановками вида {{имя_параметра}}",
-      "params": [{"name": "a", "choices": [1,2,3]}],
-      "expr": "формула ответа от параметров",
-      "hints": ["направление", "шаг"],
-      "explanation": "полный разбор"
-    },
-    {
-      "type": "choice",
-      "prompt": "вопрос",
-      "options": ["А","Б","В"],
-      "correctIndex": 0,
-      "hints": ["направление", "шаг"],
-      "explanation": "разбор"
-    }
-  ]
+  "tasks": [<задание формата ${plan.first}>, <задание формата ${plan.second}>]
+}`;
 }
-(вместо choice может быть {"type":"exact","prompt":"...","value":"эталон","alts":["варианты написания"], ...})`;
+
+/** Определить тип атома одним быстрым LLM-запросом (для атомов без atomKind) */
+const CLASSIFY_PROMPT = `Определи тип идеи атома знаний — от этого зависит, какими заданиями её проверять:
+- "fact" — изолированный факт/утверждение («первой печатной книгой был “Апостол”»);
+- "date" — событие, дата, период (Дворцовые перевороты 1725–1762);
+- "person" — персоналия: кто это, что сделал (Менделеев, Пушкин);
+- "concept" — понятие, определение, закономерность без вычислений (инфляция, метафора, адаптация);
+- "procedure" — метод, алгоритм, последовательность действий (решение квадратного уравнения, разбор слова по составу);
+- "formula" — количественная закономерность, формула, вычисление (второй закон Ньютона, процент от числа);
+- "opinion" — оценка, аргументация, вопрос «почему так произошло/чем это хорошо или плохо».
+Верни СТРОГО JSON: {"atomKind":"concept"}`;
+
+export async function classifyAtomLLM(
+  provider: LLMProvider,
+  atom: { title: string; formulation: string }
+): Promise<AtomKind> {
+  const messages: LLMMessage[] = [
+    { role: 'system', content: SYSTEM },
+    {
+      role: 'user',
+      content: `${CLASSIFY_PROMPT}\n\nАтом: «${atom.title}»\nФормулировка: ${atom.formulation}`,
+    },
+  ];
+  const parsed = await callLLMJson<{ atomKind: string }>(provider, messages, {
+    op: 'classify_atom',
+    temperature: 0.1,
+    maxTokens: 2000,
+    validate: (p) =>
+      normalizeAtomKind(p.atomKind)
+        ? null
+        : `atomKind неизвестен (${String(p.atomKind ?? 'нет')}) — ожидается fact/date/person/concept/procedure/formula/opinion`,
+  });
+  return normalizeAtomKind(parsed.atomKind)!;
+}
 
 export interface GeneratedTasks {
   feynmanQuestion?: string;
   tasks: {
-    type: 'numeric' | 'exact' | 'choice';
+    type: 'numeric' | 'exact' | 'choice' | 'essay';
     prompt: string;
     params?: { name: string; choices: number[] }[];
     expr?: string;
@@ -329,6 +411,7 @@ export interface GeneratedTasks {
     correctIndex?: number;
     value?: string;
     alts?: string[];
+    expectation?: string[]; // для essay: ключевые пункты полного ответа
     hints: string[];
     explanation: string;
   }[];
@@ -336,14 +419,32 @@ export interface GeneratedTasks {
 
 export async function genTasksForAtom(
   provider: LLMProvider,
-  atom: { title: string; formulation: string; example: string },
+  atom: {
+    title: string;
+    formulation: string;
+    example: string;
+    atomKind?: AtomKind; // если известен — роутер срабатывает без доп. запроса
+    misconception?: string; // подсказка для дистракторов choice
+  },
   sourceText?: string
 ): Promise<GeneratedTasks> {
+  // Роутер: тип атома известен из ингеста → план сразу; иначе быстрый классификатор.
+  // При сбое классификации — безопасный дефолт «понятие» (choice + essay).
+  let kind = normalizeAtomKind(atom.atomKind);
+  if (!kind) {
+    try {
+      kind = await classifyAtomLLM(provider, atom);
+    } catch {
+      kind = 'concept';
+    }
+  }
   const messages: LLMMessage[] = [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: `${TASKS_PROMPT}\n\nАтом: «${atom.title}»\nФормулировка: ${atom.formulation}\nПример: ${atom.example}\n\n${
+      content: `${buildTasksPrompt(kind)}\n\nАтом: «${atom.title}»\nФормулировка: ${atom.formulation}\nПример: ${atom.example}\n${
+        atom.misconception ? `Типичное заблуждение (используй как дистрактор): ${atom.misconception}\n` : ''
+      }${
         sourceText ? `Фрагмент источника:\n${sourceText.slice(0, 3000)}\n` : ''
       }`,
     },
@@ -352,9 +453,99 @@ export async function genTasksForAtom(
     op: 'gen_tasks',
     temperature: 0.4,
     maxTokens: 50000,
-    validate: (p) =>
-      Array.isArray(p.tasks) && p.tasks.length > 0 ? null : 'массив tasks пуст или отсутствует',
+    validate: (p) => {
+      if (!Array.isArray(p.tasks) || p.tasks.length === 0) {
+        return 'массив tasks пуст или отсутствует';
+      }
+      for (const t of p.tasks) {
+        if (t.type !== 'numeric' && t.type !== 'exact' && t.type !== 'choice' && t.type !== 'essay') {
+          return `неизвестный тип задания: ${String(t.type ?? '—')}`;
+        }
+        if (t.type === 'essay' && (!Array.isArray(t.expectation) || t.expectation.length < 2)) {
+          return 'у essay-задачи нет поля expectation (3–5 ключевых пунктов полного ответа)';
+        }
+      }
+      return null;
+    },
   });
+}
+
+// ============ 2б. Проверка открытого ответа (essay-задача) ============
+
+const ESSAY_CHECK_PROMPT = `Ты проверяешь ответ студента на открытый вопрос по идее атома. Ключевые пункты полного ответа перечислены ниже.
+
+Как проверять:
+- пункт раскрыт, если студент передал его суть (своими словами — это нормально, дословность не требуется);
+- зачёт (pass), если раскрыто большинство пунктов (>= 70%) и в ответе НЕТ фактических ошибок по теме;
+- краткий, но верный ответ — это нормально; фактические ошибки и уход от темы — не зачёт;
+- score — доля раскрытых пунктов (0..1); missed — нераскрытые/искажённые пункты (цитатами из списка);
+- feedback: 1–3 предложения, конструктивно: чего не хватает или что неверно.
+
+Верни СТРОГО JSON:
+{"verdict":"pass","score":0.75,"missed":["нераскрытый пункт"],"feedback":"..."}`;
+
+export async function checkEssayLLM(
+  provider: LLMProvider,
+  task: Task,
+  node: { title: string; formulation: string },
+  userAnswer: string
+): Promise<EssayGrade> {
+  const expectation = task.answerSpec.kind === 'essay' ? task.answerSpec.expectation : [];
+  const messages: LLMMessage[] = [
+    { role: 'system', content: SYSTEM },
+    {
+      role: 'user',
+      content: `${ESSAY_CHECK_PROMPT}\n\nИдея: «${node.title}» — ${node.formulation}\nВопрос: ${task.prompt}\nКлючевые пункты полного ответа:\n${
+        expectation.map((e, i) => `${i + 1}. ${e}`).join('\n') || '(не заданы — оцени по сути идеи)'
+      }\n\nОтвет студента:\n${userAnswer.slice(0, 6000)}`,
+    },
+  ];
+  const parsed = await callLLMJson<EssayGrade>(provider, messages, {
+    op: 'check_essay',
+    temperature: 0.2,
+    maxTokens: 8000,
+    validate: (p) =>
+      (p.verdict === 'pass' || p.verdict === 'fail') && typeof p.feedback === 'string' && p.feedback.trim()
+        ? null
+        : 'нет verdict (pass/fail) или feedback',
+  });
+  return {
+    verdict: parsed.verdict,
+    score: Math.min(1, Math.max(0, Number(parsed.score) || 0)),
+    missed: Array.isArray(parsed.missed) ? parsed.missed.slice(0, 6).map(String).filter(Boolean) : [],
+    feedback: parsed.feedback,
+  };
+}
+
+/** Локальная проверка essay без LLM (демо-режим): покрытие пунктов по словам.
+ *  Косвенная эвристика: пункт считается раскрытым, если ≥50% его значимых слов
+ *  встречаются в ответе. Порог зачёта — 70% пунктов, как у LLM-рубрики. */
+export function gradeEssayLocal(expectation: string[], userAnswer: string): EssayGrade {
+  const words = new Set(
+    normalizeText(userAnswer).split(/[^a-zа-яё0-9]+/i).filter((w) => w.length > 2)
+  );
+  let covered = 0;
+  const missed: string[] = [];
+  for (const e of expectation) {
+    const eWords = normalizeText(e).split(/[^a-zа-яё0-9]+/i).filter((w) => w.length > 2);
+    if (eWords.length === 0) {
+      covered++;
+      continue;
+    }
+    const hit = eWords.filter((w) => words.has(w)).length / eWords.length;
+    if (hit >= 0.5) covered++;
+    else missed.push(e);
+  }
+  const score = expectation.length > 0 ? covered / expectation.length : 0;
+  return {
+    verdict: score >= 0.7 ? 'pass' : 'fail',
+    score,
+    missed,
+    feedback:
+      expectation.length > 0
+        ? `Косвенная проверка без ИИ: раскрыто ${covered} из ${expectation.length} ключевых пунктов. Подключи LLM-провайдера в настройках для содержательной проверки.`
+        : 'У задачи не заданы ключевые пункты ожидаемого ответа (см. редактор узла).',
+  };
 }
 
 // ============ 3. Проверка фейнмановского объяснения ============
@@ -657,8 +848,10 @@ export async function checkTaskLLM(
     expected = `${Number.isInteger(v) ? v : Math.round(v * 100) / 100} (допуск ±${spec.tolerance ?? 0.01})`;
   } else if (spec.kind === 'exact') {
     expected = `«${spec.value}»${spec.alts?.length ? ` (также засчитывается: ${spec.alts.join('; ')})` : ''}`;
-  } else {
+  } else if (spec.kind === 'choice') {
     expected = `«${spec.options[spec.correctIndex]}» (индекс ${spec.correctIndex})`;
+  } else {
+    expected = `открытый ответ; ключевые пункты полного ответа: ${spec.expectation.join('; ')}`;
   }
   const valuesNote =
     task.params && task.params.length > 0
@@ -736,13 +929,14 @@ const FIX_TASK_PROMPT = `Исправь учебную задачу: устра�
 - текст prompt может содержать формулы в LaTeX вида $...$ и подстановки вида {{имя_параметра}};
 - задача типа exact: короткий однозначный текстовый ответ (value) и варианты написания (alts);
 - задача типа choice: 3 опции, ровно одна верная (correctIndex);
+- задача типа essay: открытый вопрос с развёрнутым ответом; expectation — 3–5 ключевых пунктов полного ответа, каждый — одна короткая содержательная фраза;
 - hints: 2 подсказки (направление, шаг — без готового ответа);
 - explanation: полный разбор, приводящий к ответу;
 - всё по-русски.
 
 Верни СТРОГО JSON одной задачи:
 {"type":"numeric","prompt":"...","params":[{"name":"a","choices":[1,2,3]}],"expr":"...","hints":["...","..."],"explanation":"..."}
-(для exact — {"type":"exact","prompt":"...","value":"...","alts":["..."],...}; для choice — {"type":"choice","prompt":"...","options":["А","Б","В"],"correctIndex":0,...})`;
+(для exact — {"type":"exact","prompt":"...","value":"...","alts":["..."],...}; для choice — {"type":"choice","prompt":"...","options":["А","Б","В"],"correctIndex":0,...}; для essay — {"type":"essay","prompt":"...","expectation":["...","...","..."],...})`;
 
 /**
  * Исправить задачу LLM. Возвращает черновик задачи в том же формате,
@@ -758,7 +952,8 @@ export async function fixTaskLLM(
   let answerLine = '';
   if (spec.kind === 'numeric') answerLine = `expr: ${spec.expr}`;
   else if (spec.kind === 'exact') answerLine = `value: ${spec.value}${spec.alts?.length ? ` (alts: ${spec.alts.join('; ')})` : ''}`;
-  else answerLine = `options: [${spec.options.map((o, i) => `${i === spec.correctIndex ? '✓' : ''}${o}`).join(' | ')}], correctIndex: ${spec.correctIndex}`;
+  else if (spec.kind === 'choice') answerLine = `options: [${spec.options.map((o, i) => `${i === spec.correctIndex ? '✓' : ''}${o}`).join(' | ')}], correctIndex: ${spec.correctIndex}`;
+  else answerLine = `expectation (ключевые пункты полного ответа): ${spec.expectation.join(' | ')}`;
   const messages: LLMMessage[] = [
     { role: 'system', content: SYSTEM },
     {
@@ -771,9 +966,9 @@ export async function fixTaskLLM(
     temperature: 0.3,
     maxTokens: 50000,
     validate: (p) =>
-      p.prompt && (p.explanation || p.expr || p.value || p.options)
+      p.prompt && (p.explanation || p.expr || p.value || p.options || p.expectation)
         ? null
-        : 'нет условия задачи (prompt) или ответа (explanation/expr/value/options)',
+        : 'нет условия задачи (prompt) или ответа (explanation/expr/value/options/expectation)',
   });
 }
 
@@ -873,7 +1068,8 @@ export function generatedToTask(
   gen: GeneratedTasks['tasks'][number],
   ids: { id: string; nodeId: string; materialId: string; orderIndex: number }
 ): Task {
-  const type: Task['type'] = gen.type === 'numeric' || gen.type === 'choice' ? gen.type : 'exact';
+  const type: Task['type'] =
+    gen.type === 'numeric' || gen.type === 'choice' || gen.type === 'essay' ? gen.type : 'exact';
   const base: Omit<Task, 'answerSpec'> = {
     id: ids.id,
     nodeId: ids.nodeId,
@@ -910,6 +1106,13 @@ export function generatedToTask(
     return {
       ...base,
       answerSpec: { kind: 'choice', options, correctIndex },
+    };
+  }
+  if (type === 'essay') {
+    return {
+      ...base,
+      // без пунктов задача не проверяема — taskProblems подсветит проблему
+      answerSpec: { kind: 'essay', expectation: toStrList(gen.expectation, 300, 6) },
     };
   }
   return {

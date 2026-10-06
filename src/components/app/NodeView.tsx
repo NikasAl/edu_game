@@ -16,8 +16,8 @@ import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
 import { checkAnswer, instantiateTask, isParametric, taskProblems } from '@/lib/task-engine';
-import { gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
-import type { Attempt, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
+import { checkEssayLLM, gradeEssayLocal, gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
+import type { Attempt, EssayGrade, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 export default function NodeView({ nodeId }: { nodeId: string }) {
@@ -420,6 +420,22 @@ function TaskTrial({
   const [correctShown, setCorrectShown] = useState<string | null>(null);
   const [hintLevel, setHintLevel] = useState(0);
   const [llmHints, setLlmHints] = useState<Record<number, string>>({});
+  const isEssay = task.type === 'essay';
+  const [essayBusy, setEssayBusy] = useState(false);
+  // свежий результат проверки открытого ответа (LLM/локальная рубрика)
+  const [essayResult, setEssayResult] = useState<EssayGrade | null>(null);
+  // восстановление последней проверки из попытки (переприход в узел)
+  const essayFromAttempt = useMemo<EssayGrade | null>(() => {
+    if (!isEssay || !attempt?.feedback) return null;
+    let missed: string[] = [];
+    try {
+      const d = JSON.parse(attempt.details ?? '{}');
+      if (Array.isArray(d.missed)) missed = d.missed.map(String);
+    } catch {
+      // без details — просто без списка нераскрытых пунктов
+    }
+    return { verdict: attempt.verdict === 'pass' ? 'pass' : 'fail', score: attempt.score ?? 0, missed, feedback: attempt.feedback };
+  }, [isEssay, attempt]);
   const hints = useMemo(() => {
     const arr = [task.hints[0] ?? '', task.hints[1] ?? '', task.explanation].filter(Boolean);
     // подсказки, догенерированные LLM, добавляются в конец (уровни после локальных)
@@ -443,6 +459,42 @@ function TaskTrial({
 
   const submit = async () => {
     if (broken) return;
+    // Открытый ответ: проверка рубрикой (LLM, без провайдера — косвенная локальная)
+    if (isEssay) {
+      const answer = input.trim();
+      if (answer.length < 10) {
+        toast.error('Напиши развёрнутый ответ своими словами');
+        return;
+      }
+      setEssayBusy(true);
+      try {
+        const grade = provider
+          ? await checkEssayLLM(provider, task, node, answer)
+          : gradeEssayLocal(task.answerSpec.kind === 'essay' ? task.answerSpec.expectation : [], answer);
+        setVerdict(grade.verdict);
+        setEssayResult(grade);
+        await db.attempts.put({
+          id: crypto.randomUUID(),
+          materialId: node.materialId,
+          nodeId: node.id,
+          kind: 'task',
+          taskId: task.id,
+          userAnswer: answer,
+          verdict: grade.verdict,
+          score: grade.score,
+          feedback: grade.feedback,
+          details: JSON.stringify({ missed: grade.missed }),
+          createdAt: new Date(),
+        });
+        if (grade.verdict === 'pass') toast.success('Ответ зачтён!');
+        else toast.error('Пока не зачтено — см. разбор');
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'Ошибка проверки');
+      } finally {
+        setEssayBusy(false);
+      }
+      return;
+    }
     const userInput = task.type === 'choice' ? String(choiceIdx ?? -1) : input;
     const res = checkAnswer(instance, task.answerSpec, userInput);
     setVerdict(res.verdict);
@@ -536,6 +588,28 @@ function TaskTrial({
               </button>
             ))}
           </div>
+        ) : isEssay ? (
+          <div className="flex flex-col gap-2">
+            <Textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              disabled={passed || broken || essayBusy}
+              placeholder="Развёрнутый ответ своими словами…"
+              rows={5}
+              className="resize-none"
+            />
+            {!passed && !broken && (
+              <PhotoOcr
+                mode="full"
+                label="Фото с решением"
+                onInsert={(t) => setInput((prev) => (prev ? `${prev}\n${t}` : t))}
+                disabled={essayBusy}
+              />
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              {provider ? 'Проверит ИИ: сравнит с ключевыми пунктами полного ответа' : 'ИИ не подключён — косвенная проверка по ключевым словам'}
+            </p>
+          </div>
         ) : (
           <div className="flex gap-2">
             <input
@@ -559,7 +633,9 @@ function TaskTrial({
 
         {!passed && (
           <div className="flex gap-2">
-            <Button onClick={submit} className="flex-1" disabled={broken}>Ответить</Button>
+            <Button onClick={submit} className="flex-1" disabled={broken || essayBusy}>
+              {essayBusy ? 'Проверяем…' : 'Ответить'}
+            </Button>
             <Button variant="outline" onClick={showHint} disabled={hintLevel >= 3 && !provider}>
               <Lightbulb className="mr-1 h-4 w-4" /> Подсказка {Math.min(hintLevel + 1, 3)}/3
             </Button>
@@ -576,11 +652,41 @@ function TaskTrial({
           </div>
         )}
 
-        {verdict && (
+        {verdict && !isEssay && (
           <div className={cn('rounded-lg border p-2.5 text-sm', verdict === 'pass' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/40 bg-rose-500/10 text-rose-300')}>
             {verdict === 'pass' ? 'Верно! Задача засчитана.' : 'Неверно.'} {verdict === 'fail' && correctShown && <>Правильный ответ: <b>{correctShown}</b>. Открой подсказки и разбери решение.</>}
           </div>
         )}
+
+        {verdict && isEssay && (() => {
+          const shown = essayResult ?? essayFromAttempt;
+          if (!shown) return null;
+          return (
+            <div className={cn('rounded-xl border p-3', shown.verdict === 'pass' ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5')}>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="secondary" className="gap-1">Раскрыто {Math.round(shown.score * 100)}%</Badge>
+                {shown.verdict === 'pass' ? (
+                  <span className="ml-auto flex items-center gap-1 text-xs font-medium text-emerald-400"><CheckCircle2 className="h-4 w-4" /> зачтено</span>
+                ) : (
+                  <span className="ml-auto flex items-center gap-1 text-xs font-medium text-amber-400"><XCircle className="h-4 w-4" /> доработай ответ</span>
+                )}
+              </div>
+              {shown.missed.length > 0 && (
+                <div className="mt-2">
+                  <p className="text-xs font-medium text-muted-foreground">Не раскрыто:</p>
+                  <ul className="mt-0.5 list-disc space-y-0.5 pl-5 text-xs text-amber-300">
+                    {shown.missed.map((m, i) => (
+                      <li key={i}><MathText>{m}</MathText></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {shown.feedback && (
+                <p className="mt-2 text-sm leading-snug text-muted-foreground"><MathText>{shown.feedback}</MathText></p>
+              )}
+            </div>
+          );
+        })()}
       </CardContent>
     </Card>
   );
