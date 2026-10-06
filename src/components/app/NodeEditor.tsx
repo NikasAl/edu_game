@@ -26,7 +26,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import MathText from '@/components/MathText';
+import RichText from '@/components/RichText';
+import CodeBlock from '@/components/CodeBlock';
 import {
   clearTaskDraft,
   db,
@@ -157,14 +158,14 @@ function CheckReportView({ report }: { report: CheckReport }) {
         <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-amber-200/90">
           {report.problems.map((p, i) => (
             <li key={i}>
-              <MathText>{p}</MathText>
+              <RichText>{p}</RichText>
             </li>
           ))}
         </ul>
       )}
       {report.feedback && (
         <p className="mt-2 text-xs leading-snug text-muted-foreground">
-          <MathText>{report.feedback}</MathText>
+          <RichText>{report.feedback}</RichText>
         </p>
       )}
     </div>
@@ -180,6 +181,7 @@ function IdeaEditor({ node, provider }: { node: IdeaNode; provider: LLMProvider 
   const [misconception, setMisconception] = useState(node.misconception ?? '');
   const [feynmanQuestion, setFeynmanQuestion] = useState(node.feynmanQuestion);
   const [keyTermsText, setKeyTermsText] = useState(node.keyTerms.join(', '));
+  const [code, setCode] = useState(node.code ?? '');
   const [busy, setBusy] = useState<'save' | 'check' | 'fix' | null>(null);
   const [report, setReport] = useState<CheckReport | null>(null);
 
@@ -193,7 +195,8 @@ function IdeaEditor({ node, provider }: { node: IdeaNode; provider: LLMProvider 
     example !== node.example ||
     misconception !== (node.misconception ?? '') ||
     feynmanQuestion !== node.feynmanQuestion ||
-    keyTermsText !== node.keyTerms.join(', ');
+    keyTermsText !== node.keyTerms.join(', ') ||
+    code !== (node.code ?? '');
 
   const currentNode = () => ({
     title: title.trim() || node.title,
@@ -202,6 +205,7 @@ function IdeaEditor({ node, provider }: { node: IdeaNode; provider: LLMProvider 
     misconception: misconception.trim() || undefined,
     feynmanQuestion: feynmanQuestion.trim(),
     keyTerms,
+    code: code.trim() || undefined,
   });
 
   const save = async () => {
@@ -218,6 +222,7 @@ function IdeaEditor({ node, provider }: { node: IdeaNode; provider: LLMProvider 
         misconception: misconception.trim() || undefined,
         feynmanQuestion: feynmanQuestion.trim(),
         keyTerms,
+        code: code.trim() || undefined,
       });
       toast.success('Идея сохранена');
     } catch (e) {
@@ -312,6 +317,11 @@ function IdeaEditor({ node, provider }: { node: IdeaNode; provider: LLMProvider 
           <Input value={keyTermsText} onChange={(e) => setKeyTermsText(e.target.value)} />
         </div>
 
+        <div className="flex flex-col gap-1.5">
+          <Label className="text-xs text-muted-foreground">Листинг кода (необязательно; без markdown-обёрток — только сам код)</Label>
+          <Textarea value={code} onChange={(e) => setCode(e.target.value)} rows={6} className="resize-none font-mono text-xs" />
+        </div>
+
         <div className="flex flex-wrap gap-2">
           <Button onClick={save} disabled={!dirty || busy !== null} className="min-w-32">
             {busy === 'save' ? 'Сохраняем…' : <><Save className="mr-1 h-4 w-4" /> Сохранить</>}
@@ -342,6 +352,8 @@ const TYPE_LABEL: Record<TaskType, string> = {
   exact: 'точный ответ',
   choice: 'выбор варианта',
   essay: 'открытый ответ',
+  code_output: 'код: что выведет',
+  code_fill: 'код: заполни пропуск',
 };
 
 function TasksEditor({
@@ -380,6 +392,7 @@ function TasksEditor({
           example: node.example,
           atomKind: node.atomKind,
           misconception: node.misconception,
+          code: node.code,
         },
         node.sourceRef
       );
@@ -542,6 +555,7 @@ function makeSampleInstance(t: Task): TaskInstance {
   if (spec.kind === 'numeric') answer = evalExpr(spec.expr, values);
   else if (spec.kind === 'exact') answer = spec.value;
   else if (spec.kind === 'choice') answer = String(spec.correctIndex);
+  else if (spec.kind === 'code') answer = spec.value;
   else answer = spec.expectation.join('; ');
   return { taskId: t.id, values, renderedPrompt, answer };
 }
@@ -582,6 +596,7 @@ function TaskEditorCard({
   const [expectationText, setExpectationText] = useState(
     task.answerSpec.kind === 'essay' ? task.answerSpec.expectation.join('\n') : ''
   );
+  const [codeText, setCodeText] = useState(task.code ?? '');
   const [hint1, setHint1] = useState(task.hints[0] ?? '');
   const [hint2, setHint2] = useState(task.hints[1] ?? '');
   const [explanation, setExplanation] = useState(task.explanation);
@@ -601,6 +616,12 @@ function TaskEditorCard({
     if (type === 'exact') {
       return {
         spec: { kind: 'exact', value: value.trim(), alts: alts.split(';').map((s) => s.trim()).filter(Boolean) } as AnswerSpec,
+        params: {},
+      };
+    }
+    if (type === 'code_output' || type === 'code_fill') {
+      return {
+        spec: { kind: 'code', value: value.trim(), alts: alts.split(';').map((s) => s.trim()).filter(Boolean) } as AnswerSpec,
         params: {},
       };
     }
@@ -639,6 +660,9 @@ function TaskEditorCard({
       }
     } else if (type === 'exact') {
       if (!value.trim()) problem.push('Заполни эталонный ответ');
+    } else if (type === 'code_output' || type === 'code_fill') {
+      if (!codeText.trim()) problem.push('Добавь листинг кода задачи');
+      if (!value.trim()) problem.push('Заполни эталонный ответ (вывод программы или фрагмент кода)');
     } else if (type === 'essay') {
       const exp = spec.spec.kind === 'essay' ? spec.spec.expectation : [];
       if (exp.length < 2) problem.push('Укажи минимум 2 ключевых пункта полного ответа (по одному в строке)');
@@ -654,6 +678,7 @@ function TaskEditorCard({
       type,
       prompt: prompt.trim(),
       params,
+      code: type === 'code_output' || type === 'code_fill' ? codeText.trim() || undefined : undefined,
       answerSpec: spec.spec,
       hints: [hint1.trim(), hint2.trim()].filter(Boolean),
       explanation: explanation.trim(),
@@ -661,7 +686,7 @@ function TaskEditorCard({
       createdAt: task.createdAt,
     };
     return { task: t, error: problem.length > 0 ? problem.join('. ') : null };
-  }, [task, type, prompt, spec, expr, paramsJson, value, correctIndex, hint1, hint2, explanation]);
+  }, [task, type, prompt, spec, expr, paramsJson, value, codeText, correctIndex, hint1, hint2, explanation]);
 
   const preview = useMemo(() => {
     void reroll; // смена счётчика пересоздаёт случайный вариант параметров
@@ -680,6 +705,7 @@ function TaskEditorCard({
       return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100).replace('.', ',');
     }
     if (draft.task.answerSpec.kind === 'exact') return String(preview.answer);
+    if (draft.task.answerSpec.kind === 'code') return String(preview.answer);
     if (draft.task.answerSpec.kind === 'essay') {
       const exp = draft.task.answerSpec.expectation;
       return exp.length > 0 ? `${exp.length} ключевых пунктов — проверяет ИИ` : '—';
@@ -697,6 +723,8 @@ function TaskEditorCard({
       setCorrectIndex(0);
     } else if (t === 'essay') {
       if (!expectationText.trim()) setExpectationText('Ключевой пункт ответа 1\nКлючевой пункт ответа 2\nКлючевой пункт ответа 3');
+    } else if (t === 'code_output' || t === 'code_fill') {
+      if (!codeText.trim()) setCodeText(t === 'code_output' ? 'print(2 + 3)' : 'def f(x):\n    return x * ___\n\nprint(f(4))');
     }
   };
 
@@ -774,6 +802,10 @@ function TaskEditorCard({
         setAlts((gen.alts ?? []).join('; '));
       } else if (gen.type === 'essay') {
         setExpectationText((gen.expectation ?? []).join('\n'));
+      } else if (gen.type === 'code_output' || gen.type === 'code_fill') {
+        setValue(gen.value ?? '');
+        setAlts((gen.alts ?? []).join('; '));
+        setCodeText(gen.code ?? '');
       } else {
         setOptionsText((gen.options ?? []).join('\n'));
         setCorrectIndex(Math.max(0, gen.correctIndex ?? 0));
@@ -842,6 +874,8 @@ function TaskEditorCard({
                   <SelectItem value="exact">Точный ответ</SelectItem>
                   <SelectItem value="choice">Выбор варианта</SelectItem>
                   <SelectItem value="essay">Открытый ответ (проверяет ИИ)</SelectItem>
+                  <SelectItem value="code_output">Код: что выведет</SelectItem>
+                  <SelectItem value="code_fill">Код: заполни пропуск</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -883,6 +917,27 @@ function TaskEditorCard({
                 <Label className="text-xs text-muted-foreground">Ключевые пункты полного ответа (по одному в строке) — по ним ИИ зачитывает ответ</Label>
                 <Textarea value={expectationText} onChange={(e) => setExpectationText(e.target.value)} rows={4} className="resize-none" />
               </div>
+            )}
+
+            {(type === 'code_output' || type === 'code_fill') && (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <Label className="text-xs text-muted-foreground">
+                    Листинг кода{type === 'code_fill' ? ' — пропуск обозначь «___» (ровно одно выражение/строка)' : ' — целиком исполняемая программа'}
+                  </Label>
+                  <Textarea value={codeText} onChange={(e) => setCodeText(e.target.value)} rows={6} className="resize-none font-mono text-xs" />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label className="text-xs text-muted-foreground">
+                    {type === 'code_output' ? 'Точный вывод программы' : 'Недостающий фрагмент кода'}
+                  </Label>
+                  <Textarea value={value} onChange={(e) => setValue(e.target.value)} rows={2} className="resize-none font-mono text-xs" />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label className="text-xs text-muted-foreground">Засчитывается также (через «;»)</Label>
+                  <Input value={alts} onChange={(e) => setAlts(e.target.value)} />
+                </div>
+              </>
             )}
 
             {type === 'choice' && (
@@ -944,8 +999,11 @@ function TaskEditorCard({
                   )}
                 </div>
                 <p className="text-sm leading-snug">
-                  <MathText>{preview.renderedPrompt}</MathText>
+                  <RichText>{preview.renderedPrompt}</RichText>
                 </p>
+                {(draft.task.type === 'code_output' || draft.task.type === 'code_fill') && draft.task.code && (
+                  <CodeBlock code={draft.task.code} className="my-1.5" />
+                )}
                 <p className="mt-1.5 text-xs text-muted-foreground">
                   Ответ решателя: <b className="text-foreground">{previewAnswer}</b>
                 </p>

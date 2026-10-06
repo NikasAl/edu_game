@@ -109,6 +109,7 @@ const INGEST_PROMPT = `Разбери учебный материал и выд�
 - для каждого атома укажи, от каких других атомов он зависит (needs): hard = без этого понять нельзя, soft = помогает;
 - зависимости должны образовывать ациклический граф;
 - atomKind — тип идеи, ровно одно значение: "fact" (изолированный факт), "date" (событие/дата/период), "person" (персоналия), "concept" (понятие/закономерность без вычислений), "procedure" (метод/алгоритм/последовательность действий), "formula" (количественная закономерность/формула/вычисление), "opinion" (оценка/аргументация «почему так»);
+- если атом поясняется листингом кода из материала — перенеси его в поле "code" атома КАК ЕСТЬ (с переносами строк и отступами, без нумерации строк, без markdown-обёрток из трёх обратных кавычек; не более ~20 строк; если листинга нет — пустая строка);
 - 1–3 региона (главы/раздела), атомы распределены по регионам;
 - feynmanQuestion — вопрос, требующий объяснения идеи СВОИМИ словами с примером;
 - sourceQuote — короткая цитата из материала, к которой привязан атом (если она есть).
@@ -126,6 +127,7 @@ const INGEST_PROMPT = `Разбери учебный материал и выд�
     "feynmanQuestion": "вопрос для объяснения своими словами",
     "keyTerms": ["3-6 ключевых терминов идеи"],
     "atomKind": "concept",
+    "code": "листинг кода (или пусто)",
     "needs": [{"title": "название другого атома", "kind": "hard|soft"}]
   }]
 }`;
@@ -338,16 +340,33 @@ const TASK_FORMATS_DOC = `Форматы заданий (поля JSON):
 - numeric — числовая параметрическая: {"type":"numeric","prompt":"...","params":[{"name":"a","choices":[1,2,3]}],"expr":"формула ответа от параметров","hints":["...","..."],"explanation":"..."}; ВАЖНО: expr — чистый синтаксис решателя: только числа, латинские имена параметров, + - * / ^, скобки и функции sqrt/abs/min/max/round/ln/log/floor/ceil; НЕ LaTeX; НЕ используй символы %, ×, ÷, √, π и запятые (проценты — «x/100», корень — sqrt(x), число пи — pi);
 - exact — точный короткий ответ: {"type":"exact","prompt":"...","value":"эталон","alts":["варианты написания"],"hints":[...],"explanation":"..."}; ответ однозначен и краток (слово, имя, дата, число);
 - choice — выбор варианта: {"type":"choice","prompt":"...","options":["А","Б","В"],"correctIndex":0,"hints":[...],"explanation":"..."}; ровно одна верная опция, дистракторы — правдоподобные ошибки;
-- essay — открытый развёрнутый ответ: {"type":"essay","prompt":"...","expectation":["ключевой пункт 1","ключевой пункт 2","ключевой пункт 3"],"hints":[...],"explanation":"..."}; expectation — 3–5 ключевых пунктов ПОЛНОГО ответа, каждый — одна короткая содержательная фраза; вопрос должен требовать рассуждения/объяснения, а не одного слова.`;
+- essay — открытый развёрнутый ответ: {"type":"essay","prompt":"...","expectation":["ключевой пункт 1","ключевой пункт 2","ключевой пункт 3"],"hints":[...],"explanation":"..."}; expectation — 3–5 ключевых пунктов ПОЛНОГО ответа, каждый — одна короткая содержательная фраза; вопрос должен требовать рассуждения/объяснения, а не одного слова.
+- code_output — «что выведет код»: {"type":"code_output","prompt":"Что выведет этот код?","code":"полный листинг, переносы строк — \\n","value":"точный вывод программы","alts":["варианты записи вывода"],"hints":[...],"explanation":"пошаговая трасса выполнения"}; листинг — минимальная ЦЕЛИКОМ исполняемая программа (не фрагмент); value — ровно то, что напечатает программа, без кавычек-обёрток;
+- code_fill — «заполни пропуск»: {"type":"code_fill","prompt":"Заполни пропуск, чтобы код ...","code":"листинг, в котором пропуск обозначен ___","value":"недостающий фрагмент кода","alts":["эквивалентные варианты фрагмента"],"hints":[...],"explanation":"..."}; пропуск ___ заменяет РОВНО одно выражение/строку, ответ однозначен; value — код (выражение/строка), а не объяснение.`;
 
 const TASKS_COMMON_RULES = `Общие требования:
 - текст задания (prompt) может содержать формулы в LaTeX вида $...$ и подстановки вида {{имя_параметра}} (подстановки — только для numeric);
+- в полях code/value/alts код-задач (code_output/code_fill) — ЧИСТЫЙ код или вывод: без LaTeX, без markdown и кавычек-обёрток; переносы строк внутри кода сохраняй;
 - числовые ответы — целые или с <=2 знаками после запятой; answers должны быть вычислимы/однозначны;
 - hints: 2 подсказки (1-я — направление, 2-я — шаг решения), explanation — полный разбор (можно с LaTeX);
 - всё по-русски, в рамках идеи атома; задания проверяют именно эту идею, а не смежные темы.`;
 
-function buildTasksPrompt(kind: AtomKind): string {
+/**
+ * План заданий при наличии листинга кода у атома: пара code_output + code_fill.
+ * Если листинг не годится для одного из форматов, модель меняет его на базовый план.
+ */
+const CODE_PLAN_NOTE = (baseFirst: TaskType, baseSecond: TaskType) =>
+  `У атома ЕСТЬ листинг кода (дан ниже) — план такой:
+- задание 1 — формат code_output: «Что выведет этот код?» по листингу атома; если листинг — нецелая программа, допиши его в поле code до минимальной работающей; если идея в принципе не проверяется выводом программы — замени формат на ${baseFirst};
+- задание 2 — формат code_fill: листинг с пропуском ___ (ровно одно выражение/строка, ответ однозначен); если пропуск неуместен — замени формат на ${baseSecond}.
+В code-заданиях проверяй именно идею атома, а не смежные конструкции языка.`;
+
+function buildTasksPrompt(kind: AtomKind, hasCode = false): string {
   const plan = TASK_PLANS[kind];
+  const planBlock = hasCode
+    ? CODE_PLAN_NOTE(plan.first, plan.second)
+    : `- задание 1 — формат ${plan.first}: ${plan.note};
+- задание 2 — формат ${plan.second}.`;
   return `Создай для атома знания 2 проверяемых задания.
 
 Форматы заданий:
@@ -356,14 +375,13 @@ ${TASK_FORMATS_DOC}
 ${TASKS_COMMON_RULES}
 
 ПЛАН для этого атома (тип идеи: ${kind}):
-- задание 1 — формат ${plan.first}: ${plan.note};
-- задание 2 — формат ${plan.second}.
+${planBlock}
 Оба задания в указанных форматах; не заменяй формат другим без веской причины.
 
 Верни СТРОГО JSON:
 {
   "feynmanQuestion": "вопрос для объяснения своими словами (если удалось уточнить — иначе повтори исходный)",
-  "tasks": [<задание формата ${plan.first}>, <задание формата ${plan.second}>]
+  "tasks": [<задание формата ${hasCode ? 'code_output' : plan.first}>, <задание формата ${hasCode ? 'code_fill' : plan.second}>]
 }`;
 }
 
@@ -404,7 +422,7 @@ export async function classifyAtomLLM(
 export interface GeneratedTasks {
   feynmanQuestion?: string;
   tasks: {
-    type: 'numeric' | 'exact' | 'choice' | 'essay';
+    type: 'numeric' | 'exact' | 'choice' | 'essay' | 'code_output' | 'code_fill';
     prompt: string;
     params?: { name: string; choices: number[] }[];
     expr?: string;
@@ -413,6 +431,7 @@ export interface GeneratedTasks {
     value?: string;
     alts?: string[];
     expectation?: string[]; // для essay: ключевые пункты полного ответа
+    code?: string; // для code_output/code_fill: листинг задачи
     hints: string[];
     explanation: string;
   }[];
@@ -426,6 +445,7 @@ export async function genTasksForAtom(
     example: string;
     atomKind?: AtomKind; // если известен — роутер срабатывает без доп. запроса
     misconception?: string; // подсказка для дистракторов choice
+    code?: string; // листинг кода атома → план code_output + code_fill
   },
   sourceText?: string
 ): Promise<GeneratedTasks> {
@@ -439,12 +459,17 @@ export async function genTasksForAtom(
       kind = 'concept';
     }
   }
+  const listing = typeof atom.code === 'string' ? atom.code.trim() : '';
   const messages: LLMMessage[] = [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: `${buildTasksPrompt(kind)}\n\nАтом: «${atom.title}»\nФормулировка: ${atom.formulation}\nПример: ${atom.example}\n${
+      content: `${buildTasksPrompt(kind, listing.length > 0)}\n\nАтом: «${atom.title}»\nФормулировка: ${atom.formulation}\nПример: ${atom.example}\n${
         atom.misconception ? `Типичное заблуждение (используй как дистрактор): ${atom.misconception}\n` : ''
+      }${
+        listing
+          ? `Листинг кода атома (используй для code_output/code_fill):\n\`\`\`\n${listing.slice(0, 3000)}\n\`\`\`\n`
+          : ''
       }${
         sourceText ? `Фрагмент источника:\n${sourceText.slice(0, 3000)}\n` : ''
       }`,
@@ -459,11 +484,21 @@ export async function genTasksForAtom(
         return 'массив tasks пуст или отсутствует';
       }
       for (const t of p.tasks) {
-        if (t.type !== 'numeric' && t.type !== 'exact' && t.type !== 'choice' && t.type !== 'essay') {
+        if (
+          t.type !== 'numeric' &&
+          t.type !== 'exact' &&
+          t.type !== 'choice' &&
+          t.type !== 'essay' &&
+          t.type !== 'code_output' &&
+          t.type !== 'code_fill'
+        ) {
           return `неизвестный тип задания: ${String(t.type ?? '—')}`;
         }
         if (t.type === 'essay' && (!Array.isArray(t.expectation) || t.expectation.length < 2)) {
           return 'у essay-задачи нет поля expectation (3–5 ключевых пунктов полного ответа)';
+        }
+        if ((t.type === 'code_output' || t.type === 'code_fill') && (!String(t.value ?? '').trim() || !String(t.code ?? '').trim())) {
+          return 'у code-задачи должны быть заполнены поля code (листинг) и value (эталонный ответ)';
         }
       }
       return null;
@@ -958,6 +993,8 @@ export async function checkTaskLLM(
     expected = `«${spec.value}»${spec.alts?.length ? ` (также засчитывается: ${spec.alts.join('; ')})` : ''}`;
   } else if (spec.kind === 'choice') {
     expected = `«${spec.options[spec.correctIndex]}» (индекс ${spec.correctIndex})`;
+  } else if (spec.kind === 'code') {
+    expected = `«${spec.value}»${spec.alts?.length ? ` (также засчитывается: ${spec.alts.join('; ')})` : ''}`;
   } else {
     expected = `открытый ответ; ключевые пункты полного ответа: ${spec.expectation.join('; ')}`;
   }
@@ -965,11 +1002,12 @@ export async function checkTaskLLM(
     task.params && task.params.length > 0
       ? `\nЗначения параметров для проверки: ${task.params.map((p) => `${p.name}=${sample.values[p.name] ?? p.choices[0]}`).join(', ')}`
       : '';
+  const codeNote = task.code ? `\n\nЛистинг кода задачи:\n\`\`\`\n${task.code}\n\`\`\`` : '';
   const messages: LLMMessage[] = [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: `${CHECK_TASK_PROMPT}\n\nИдея: «${node.title}» — ${node.formulation}\n\nТип задачи: ${task.type}\nШаблон условия: ${task.prompt}${valuesNote}\nЭкземпляр для проверки: ${sample.renderedPrompt}\nЭталонный ответ: ${expected}\n\nПодсказки:\n${task.hints.map((h, i) => `${i + 1}. ${h}`).join('\n') || '(нет)'}\n\nРазбор:\n${task.explanation || '(нет)'}`,
+      content: `${CHECK_TASK_PROMPT}\n\nИдея: «${node.title}» — ${node.formulation}\n\nТип задачи: ${task.type}\nШаблон условия: ${task.prompt}${valuesNote}\nЭкземпляр для проверки: ${sample.renderedPrompt}${codeNote}\nЭталонный ответ: ${expected}\n\nПодсказки:\n${task.hints.map((h, i) => `${i + 1}. ${h}`).join('\n') || '(нет)'}\n\nРазбор:\n${task.explanation || '(нет)'}`,
     },
   ];
   const parsed = await callLLMJson<CheckReport>(provider, messages, {
@@ -991,6 +1029,7 @@ export async function checkTaskLLM(
 const CHECK_IDEA_PROMPT = `Проверь карточку идеи (атом знаний) как методист:
 - formulation: фактически верна и атомарна (ровно одна идея, одно предложение);
 - example: наглядный пример, соответствующий идее, без ошибок;
+- code (если задан): листинг синтаксически и логически корректен, исполняется без ошибок и иллюстрирует именно эту идею;
 - feynmanQuestion: вопрос требует объяснения своими словами (а не «перескажи определение»);
 - keyTerms: ключевые термины соответствуют идее.
 Не выдумывай ошибок: если всё верно — так и скажи.
@@ -1005,13 +1044,14 @@ export async function checkIdeaLLM(
     misconception?: string;
     feynmanQuestion: string;
     keyTerms: string[];
+    code?: string;
   }
 ): Promise<CheckReport> {
   const messages: LLMMessage[] = [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: `${CHECK_IDEA_PROMPT}\n\nНазвание: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\nЧастая ошибка: ${node.misconception || '(не указана)'}\nВопрос Фейнмана: ${node.feynmanQuestion}\nКлючевые термины: ${node.keyTerms.join(', ') || '(нет)'}`,
+      content: `${CHECK_IDEA_PROMPT}\n\nНазвание: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\nЧастая ошибка: ${node.misconception || '(не указана)'}\nВопрос Фейнмана: ${node.feynmanQuestion}\nКлючевые термины: ${node.keyTerms.join(', ') || '(нет)'}${node.code ? `\nЛистинг кода:\n\`\`\`\n${node.code}\n\`\`\`` : ''}`,
     },
   ];
   const parsed = await callLLMJson<CheckReport>(provider, messages, {
@@ -1038,13 +1078,16 @@ const FIX_TASK_PROMPT = `Исправь учебную задачу: устра�
 - задача типа exact: короткий однозначный текстовый ответ (value) и варианты написания (alts);
 - задача типа choice: 3 опции, ровно одна верная (correctIndex);
 - задача типа essay: открытый вопрос с развёрнутым ответом; expectation — 3–5 ключевых пунктов полного ответа, каждый — одна короткая содержательная фраза;
+- задача типа code_output: поле code — минимальная ЦЕЛИКОМ исполняемая программа; value — точный вывод программы;
+- задача типа code_fill: поле code — листинг с пропуском ___ (ровно одно выражение/строка); value — недостающий фрагмент кода (не объяснение);
+- в code/value/alts код-задач — чистый код или вывод, без LaTeX и markdown;
 - hints: 2 подсказки (направление, шаг — без готового ответа);
 - explanation: полный разбор, приводящий к ответу;
 - всё по-русски.
 
 Верни СТРОГО JSON одной задачи:
 {"type":"numeric","prompt":"...","params":[{"name":"a","choices":[1,2,3]}],"expr":"...","hints":["...","..."],"explanation":"..."}
-(для exact — {"type":"exact","prompt":"...","value":"...","alts":["..."],...}; для choice — {"type":"choice","prompt":"...","options":["А","Б","В"],"correctIndex":0,...}; для essay — {"type":"essay","prompt":"...","expectation":["...","...","..."],...})`;
+(для exact — {"type":"exact","prompt":"...","value":"...","alts":["..."],...}; для choice — {"type":"choice","prompt":"...","options":["А","Б","В"],"correctIndex":0,...}; для essay — {"type":"essay","prompt":"...","expectation":["...","...","..."],...}; для code_output — {"type":"code_output","prompt":"...","code":"...","value":"...","alts":["..."],...}; для code_fill — {"type":"code_fill","prompt":"...","code":"... с ___ ...","value":"...","alts":["..."],...})`;
 
 /**
  * Исправить задачу LLM. Возвращает черновик задачи в том же формате,
@@ -1061,12 +1104,14 @@ export async function fixTaskLLM(
   if (spec.kind === 'numeric') answerLine = `expr: ${spec.expr}`;
   else if (spec.kind === 'exact') answerLine = `value: ${spec.value}${spec.alts?.length ? ` (alts: ${spec.alts.join('; ')})` : ''}`;
   else if (spec.kind === 'choice') answerLine = `options: [${spec.options.map((o, i) => `${i === spec.correctIndex ? '✓' : ''}${o}`).join(' | ')}], correctIndex: ${spec.correctIndex}`;
+  else if (spec.kind === 'code') answerLine = `value: ${spec.value}${spec.alts?.length ? ` (alts: ${spec.alts.join('; ')})` : ''}`;
   else answerLine = `expectation (ключевые пункты полного ответа): ${spec.expectation.join(' | ')}`;
+  const codeLine = task.code ? `Код задачи:\n\`\`\`\n${task.code}\n\`\`\`\n` : '';
   const messages: LLMMessage[] = [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: `${FIX_TASK_PROMPT}\n\nИдея: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\n\nЗАДАЧА (тип ${task.type}):\nУсловие: ${task.prompt}\n${spec.kind === 'numeric' && task.params?.length ? `Параметры: ${JSON.stringify(task.params)}\n` : ''}${answerLine}\nПодсказки: ${task.hints.join(' | ') || '(нет)'}\nРазбор: ${task.explanation || '(нет)'}\n${problems?.length ? `\nНАЙДЕННЫЕ ПРОБЛЕМЫ (устрани их):\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`,
+      content: `${FIX_TASK_PROMPT}\n\nИдея: «${node.title}»\nФормулировка: ${node.formulation}\nПример: ${node.example}\n\nЗАДАЧА (тип ${task.type}):\nУсловие: ${task.prompt}\n${spec.kind === 'numeric' && task.params?.length ? `Параметры: ${JSON.stringify(task.params)}\n` : ''}${codeLine}${answerLine}\nПодсказки: ${task.hints.join(' | ') || '(нет)'}\nРазбор: ${task.explanation || '(нет)'}\n${problems?.length ? `\nНАЙДЕННЫЕ ПРОБЛЕМЫ (устрани их):\n${problems.map((p) => `- ${p}`).join('\n')}` : ''}`,
     },
   ];
   return callLLMJson<GeneratedTasks['tasks'][number]>(provider, messages, {
@@ -1177,7 +1222,9 @@ export function generatedToTask(
   ids: { id: string; nodeId: string; materialId: string; orderIndex: number }
 ): Task {
   const type: Task['type'] =
-    gen.type === 'numeric' || gen.type === 'choice' || gen.type === 'essay' ? gen.type : 'exact';
+    gen.type === 'numeric' || gen.type === 'choice' || gen.type === 'essay' || gen.type === 'code_output' || gen.type === 'code_fill'
+      ? gen.type
+      : 'exact';
   const base: Omit<Task, 'answerSpec'> = {
     id: ids.id,
     nodeId: ids.nodeId,
@@ -1221,6 +1268,14 @@ export function generatedToTask(
       ...base,
       // без пунктов задача не проверяема — taskProblems подсветит проблему
       answerSpec: { kind: 'essay', expectation: toStrList(gen.expectation, 300, 6) },
+    };
+  }
+  if (type === 'code_output' || type === 'code_fill') {
+    return {
+      ...base,
+      // без листинга задача непроверяема — taskProblems подсветит проблему
+      code: toStr(gen.code, 4000) || undefined,
+      answerSpec: { kind: 'code', value: toStr(gen.value, 500), alts: toStrList(gen.alts, 300, 6) },
     };
   }
   return {

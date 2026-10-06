@@ -83,6 +83,22 @@ const OCR_RENDER_QUALITY = 0.9;
  */
 const MAX_ATOMS = 200;
 
+/**
+ * Листинг кода атома из ответа LLM → безопасная строка:
+ * отрезать markdown-обёртки ``` (модель добавляет их вопреки инструкции),
+ * обрезать пробелы, ограничить длину. Пустое/нестрочное значение → undefined.
+ */
+function normalizeAtomCode(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  let s = v.trim();
+  // пара фенсов ```lang\n...\n``` — снимаем обёртку
+  if (s.startsWith('```')) {
+    s = s.replace(/^```[a-zA-Z0-9_+#-]*[ \t]*\n?/, '').replace(/\n?```[ \t]*$/, '');
+  }
+  s = s.trim().slice(0, 2000);
+  return s.length > 0 ? s : undefined;
+}
+
 export default function ImportPanel() {
   const providers = useAppStore((s) => s.providers);
   const activeProvider = providers.find((p) => p.isActive) ?? null;
@@ -463,6 +479,7 @@ export default function ImportPanel() {
         feynmanQuestion: a.feynmanQuestion || `Объясни своими словами: ${a.formulation}`,
         keyTerms: Array.isArray(a.keyTerms) ? a.keyTerms.slice(0, 6) : [],
         atomKind: normalizeAtomKind(a.atomKind), // мусор от LLM → undefined (роутер классифицирует сам)
+        code: normalizeAtomCode(a.code),
         orderIndex: i,
         createdAt: now,
       }));
@@ -524,6 +541,7 @@ export default function ImportPanel() {
               example: nodes[i].example,
               atomKind: nodes[i].atomKind,
               misconception: nodes[i].misconception,
+              code: nodes[i].code,
             },
             ingestResult.atoms[i].sourceQuote
           );
@@ -1203,6 +1221,7 @@ function ReviewList({ onBack, onSave }: { onBack: () => void; onSave: () => void
             />
             <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
               <Badge variant="secondary">{ingestResult.regions[a.regionIndex]?.title ?? '—'}</Badge>
+              {normalizeAtomCode(a.code) && <Badge variant="outline">листинг кода</Badge>}
               {(a.needs ?? []).map((n, j) => (
                 <Badge key={j} variant="outline" className="gap-1">
                   <ArrowRight className="h-3 w-3" /> {n.title} ({n.kind})

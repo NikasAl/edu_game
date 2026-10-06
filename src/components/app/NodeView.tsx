@@ -9,7 +9,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
-import MathText from '@/components/MathText';
+import RichText from '@/components/RichText';
+import CodeBlock from '@/components/CodeBlock';
 import PhotoOcr from '@/components/app/PhotoOcr';
 import { db, setMeta } from '@/lib/db';
 import { useAppStore } from '@/store/useAppStore';
@@ -206,20 +207,26 @@ function IdeaCard({ node }: { node: IdeaNode }) {
         <div>
           <p className="text-[11px] font-medium uppercase tracking-wide text-primary">Идея</p>
           <p className="mt-1 text-[15px] font-medium leading-snug">
-            <MathText>{node.formulation}</MathText>
+            <RichText>{node.formulation}</RichText>
           </p>
         </div>
         <div className="rounded-lg bg-muted/50 p-3">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Пример</p>
           <p className="mt-1 text-sm leading-snug">
-            <MathText>{node.example}</MathText>
+            <RichText>{node.example}</RichText>
           </p>
         </div>
+        {node.code && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Код</p>
+            <CodeBlock code={node.code} />
+          </div>
+        )}
         {node.misconception && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
             <p className="text-[11px] font-medium uppercase tracking-wide text-amber-400">Частая ошибка</p>
             <p className="mt-1 text-sm leading-snug text-amber-200/90">
-              <MathText>{node.misconception}</MathText>
+              <RichText>{node.misconception}</RichText>
             </p>
           </div>
         )}
@@ -235,7 +242,7 @@ function IdeaCard({ node }: { node: IdeaNode }) {
                 <DialogTitle>Источник</DialogTitle>
               </DialogHeader>
               <p className="text-sm leading-relaxed text-muted-foreground">
-                <MathText>{node.sourceRef}</MathText>
+                <RichText>{node.sourceRef}</RichText>
               </p>
             </DialogContent>
           </Dialog>
@@ -311,7 +318,7 @@ function FeynmanTrial({
           mode={provider ? `LLM: ${provider.model}` : 'локальный оценщик (демо)'}
         />
         <p className="text-sm leading-snug text-muted-foreground">
-          <MathText>{node.feynmanQuestion}</MathText>
+          <RichText>{node.feynmanQuestion}</RichText>
         </p>
         <Textarea
           placeholder="Представь, что объясняешь другу. Суть своими словами + пример…"
@@ -364,14 +371,14 @@ function GradeResult({ grade }: { grade: FeynmanGrade }) {
         <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-rose-300">
           {grade.misconceptions.map((m, i) => (
             <li key={i}>
-              <MathText>{m}</MathText>
+              <RichText>{m}</RichText>
             </li>
           ))}
         </ul>
       )}
       {grade.feedback && (
         <p className="mt-2 text-sm leading-snug text-muted-foreground">
-          <MathText>{grade.feedback}</MathText>
+          <RichText>{grade.feedback}</RichText>
         </p>
       )}
     </div>
@@ -446,6 +453,7 @@ function TaskTrial({
   }, [task, llmHints]);
   const passed = attempt?.verdict === 'pass' && verdict === 'pass';
   const choiceSpec = task.answerSpec.kind === 'choice' ? task.answerSpec : null;
+  const isCode = task.type === 'code_output' || task.type === 'code_fill';
 
   const reRandomize = () => {
     if (!isParametric(task) || broken) return;
@@ -548,8 +556,11 @@ function TaskTrial({
           ) : undefined}
         />
         <p className="text-sm leading-snug">
-          <MathText>{instance.renderedPrompt}</MathText>
+          <RichText>{instance.renderedPrompt}</RichText>
         </p>
+
+        {/* Листинг code-задачи (code_output — целая программа, code_fill — с пропуском ___) */}
+        {isCode && task.code && <CodeBlock code={task.code} />}
 
         {/* Сломанная задача: валидные части показываем, но пройти нельзя — чини в редакторе */}
         {broken && (
@@ -584,7 +595,7 @@ function TaskTrial({
                   passed && i === choiceSpec.correctIndex && 'border-emerald-500/60 bg-emerald-500/10'
                 )}
               >
-                <MathText>{opt}</MathText>
+                <RichText>{opt}</RichText>
               </button>
             ))}
           </div>
@@ -617,9 +628,14 @@ function TaskTrial({
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && !passed && !broken && submit()}
               disabled={passed || broken}
-              placeholder="Ответ"
+              placeholder={
+                task.type === 'code_output' ? 'Вывод программы' : task.type === 'code_fill' ? 'Недостающий фрагмент кода' : 'Ответ'
+              }
               inputMode="text"
-              className="h-10 flex-1 rounded-lg border border-input bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-primary"
+              className={cn(
+                'h-10 flex-1 rounded-lg border border-input bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-primary',
+                isCode && 'font-mono'
+              )}
             />
             {!passed && !broken && (
               <PhotoOcr
@@ -645,16 +661,22 @@ function TaskTrial({
         {hintLevel > 0 && (
           <div className="rounded-lg bg-muted/50 p-3 text-sm leading-snug">
             {hints.slice(0, hintLevel).map((h, i) => (
-              <p key={i} className={i > 0 ? 'mt-2 border-t border-border/60 pt-2' : ''}>
-                <MathText>{h}</MathText>
-              </p>
+              <div key={i} className={i > 0 ? 'mt-2 border-t border-border/60 pt-2' : ''}>
+                <RichText>{h}</RichText>
+              </div>
             ))}
           </div>
         )}
 
         {verdict && !isEssay && (
           <div className={cn('rounded-lg border p-2.5 text-sm', verdict === 'pass' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/40 bg-rose-500/10 text-rose-300')}>
-            {verdict === 'pass' ? 'Верно! Задача засчитана.' : 'Неверно.'} {verdict === 'fail' && correctShown && <>Правильный ответ: <b>{correctShown}</b>. Открой подсказки и разбери решение.</>}
+            {verdict === 'pass' ? 'Верно! Задача засчитана.' : 'Неверно.'}{' '}
+            {verdict === 'fail' && correctShown && (
+              <>
+                Правильный ответ:{' '}
+                <b className={isCode ? 'font-mono' : undefined}>{correctShown}</b>. Открой подсказки и разбери решение.
+              </>
+            )}
           </div>
         )}
 
@@ -676,13 +698,13 @@ function TaskTrial({
                   <p className="text-xs font-medium text-muted-foreground">Не раскрыто:</p>
                   <ul className="mt-0.5 list-disc space-y-0.5 pl-5 text-xs text-amber-300">
                     {shown.missed.map((m, i) => (
-                      <li key={i}><MathText>{m}</MathText></li>
+                      <li key={i}><RichText>{m}</RichText></li>
                     ))}
                   </ul>
                 </div>
               )}
               {shown.feedback && (
-                <p className="mt-2 text-sm leading-snug text-muted-foreground"><MathText>{shown.feedback}</MathText></p>
+                <p className="mt-2 text-sm leading-snug text-muted-foreground"><RichText>{shown.feedback}</RichText></p>
               )}
             </div>
           );
@@ -790,13 +812,13 @@ function OwnTaskTrial({
               <p className="mt-2 text-muted-foreground">
                 Ответ проверяющего:{' '}
                 <b className="text-foreground">
-                  <MathText>{shown.answer}</MathText>
+                  <RichText>{shown.answer}</RichText>
                 </b>
               </p>
             )}
             {shown.feedback && (
               <p className="mt-1.5 leading-snug text-muted-foreground">
-                <MathText>{shown.feedback}</MathText>
+                <RichText>{shown.feedback}</RichText>
               </p>
             )}
           </div>

@@ -57,6 +57,7 @@ export const DEMO_NODES: IdeaNode[] = [
     feynmanQuestion:
       'Объясни своими словами: что такое приращение функции, если s(t) — путь автомобиля? Что означает Δs = 30 м при Δt = 2 с?',
     keyTerms: ['приращение', 'разница', 'аргумент', 'значение', 'изменение'],
+    code: 'def f(x):\n    return x ** 2\n\ndx = 0.001\nx = 2\n\ndf = f(x + dx) - f(x)\nprint(round(df / dx, 3))  # численное приращение: 4.001',
     orderIndex: 0,
     createdAt: new Date(),
   },

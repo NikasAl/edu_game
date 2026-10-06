@@ -145,6 +145,7 @@ export interface IdeaNode {
   feynmanQuestion: string; // вопрос для фейнмановского объяснения
   keyTerms: string[]; // ключевые термины (для локального оценщика и подсказок)
   atomKind?: AtomKind; // тип идеи (роутер заданий; у старых атомов может не быть)
+  code?: string; // листинг кода, поясняющий идею (если был в материале)
   orderIndex: number;
   createdAt: Date;
 }
@@ -163,7 +164,7 @@ export interface IdeaEdge {
 
 // ============ Задания ============
 
-export type TaskType = 'numeric' | 'exact' | 'choice' | 'essay';
+export type TaskType = 'numeric' | 'exact' | 'choice' | 'essay' | 'code_output' | 'code_fill';
 
 /** Параметр шаблона задачи: список допустимых значений для рандомизации */
 export interface TaskParam {
@@ -175,7 +176,8 @@ export type AnswerSpec =
   | { kind: 'numeric'; expr: string; tolerance?: number } // expr — выражение от параметров
   | { kind: 'exact'; value: string; alts?: string[] }
   | { kind: 'choice'; options: string[]; correctIndex: number }
-  | { kind: 'essay'; expectation: string[] }; // открытый ответ: ключевые пункты полного ответа
+  | { kind: 'essay'; expectation: string[] } // открытый ответ: ключевые пункты полного ответа
+  | { kind: 'code'; value: string; alts?: string[] }; // code_output: точный вывод; code_fill: недостающий фрагмент
 
 export interface Task {
   id: string;
@@ -184,6 +186,7 @@ export interface Task {
   type: TaskType;
   prompt: string; // с подстановками вида {{param}}
   params?: TaskParam[]; // для параметрических задач
+  code?: string; // листинг кода задачи (code_output/code_fill)
   answerSpec: AnswerSpec;
   explanation: string; // разбор (подсказка 3-го уровня)
   hints: string[]; // подсказки 1–2 уровней
@@ -295,6 +298,7 @@ export interface ParsedAtom {
   feynmanQuestion: string;
   keyTerms: string[];
   atomKind?: AtomKind; // тип идеи (для роутера заданий)
+  code?: string; // листинг кода из материала (если есть)
   regionIndex: number;
   needs?: { title: string; kind: EdgeKind }[]; // от чего зависит
 }

@@ -12,6 +12,45 @@ function pick(choices: number[]): number {
   return safe[Math.floor(Math.random() * safe.length)];
 }
 
+// ============ Нормализация ответов на code-задачи ============
+
+/**
+ * Нормализация ответа на code-задачу (code_output/code_fill):
+ * убрать CR, обрезать пробелы по краям строк, выбросить пустые строки.
+ * Регистр и внутренние пробелы значимы (вывод программы — дословный),
+ * а мелкий «шум набора» (пустые строки, хвостовые точки с запятой,
+ * свёртка многострочного вывода в одну строку) сравнение прощает.
+ */
+export function normalizeCodeAnswer(s: string): string {
+  return s
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .join('\n');
+}
+
+/** Все варианты ответа, которые считаются эквивалентными эталону */
+export function codeAnswerVariants(s: string): string[] {
+  const base = normalizeCodeAnswer(s);
+  if (!base) return [];
+  const noSemi = base
+    .split('\n')
+    .map((l) => l.replace(/;+$/, '').trim())
+    .filter((l) => l.length > 0)
+    .join('\n');
+  // свёртка в строку — от варианта без «;», чтобы «1;\n2;» совпал с «1 2»
+  const singleLine = noSemi.split('\n').join(' ');
+  return [...new Set([base, noSemi, singleLine])];
+}
+
+/** Совпадает ли ответ пользователя с одним из эталонов (value + alts) с точностью до шума набора */
+function codeAnswerEquals(userInput: string, refs: string[]): boolean {
+  const userVariants = codeAnswerVariants(userInput);
+  if (userVariants.length === 0) return false;
+  return refs.some((r) => codeAnswerVariants(r).some((rv) => userVariants.includes(rv)));
+}
+
 /**
  * Создать экземпляр задачи: подставить параметры в промпт и вычислить ответ.
  * Для задач без параметров возвращает промпт как есть.
@@ -46,6 +85,8 @@ export function instantiateTask(task: Task): TaskInstance {
     answer = spec.value;
   } else if (spec.kind === 'choice') {
     answer = String(spec.correctIndex);
+  } else if (spec.kind === 'code') {
+    answer = spec.value;
   } else {
     // essay: локального эталона нет — проверка LLM/локальной рубрикой в NodeView
     answer = '';
@@ -76,6 +117,10 @@ export function checkAnswer(instance: TaskInstance, spec: AnswerSpec, userInput:
     const norm = normalizeText(userInput);
     const candidates = [spec.value, ...(spec.alts ?? [])].map(normalizeText);
     return { verdict: candidates.includes(norm) ? 'pass' : 'fail', correctAnswer: spec.value };
+  }
+  if (spec.kind === 'code') {
+    const ok = codeAnswerEquals(userInput, [spec.value, ...(spec.alts ?? [])]);
+    return { verdict: ok ? 'pass' : 'fail', correctAnswer: ok ? undefined : spec.value };
   }
   // choice: userInput — индекс строки
   const idx = parseInt(userInput, 10);
@@ -117,6 +162,9 @@ export function taskProblems(task: Task): string[] {
   } else if (spec.kind === 'essay') {
     const exp = (spec.expectation ?? []).filter((e) => String(e).trim());
     if (exp.length < 2) problems.push('Не заданы ключевые пункты ожидаемого ответа (нужно минимум 2)');
+  } else if (spec.kind === 'code') {
+    if (!String(spec.value ?? '').trim()) problems.push('Не заполнен эталонный ответ (вывод программы или фрагмент кода)');
+    if (!String(task.code ?? '').trim()) problems.push('Нет листинга кода задачи (поле code)');
   }
   return problems;
 }
