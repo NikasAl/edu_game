@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -13,13 +13,15 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { ChevronRight, Lock, Map as MapIcon, TriangleAlert } from 'lucide-react';
+import { ChevronRight, Loader2, Lock, Map as MapIcon, TriangleAlert, Waypoints } from 'lucide-react';
 import { toast } from 'sonner';
 import { Progress } from '@/components/ui/progress';
+import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useMapStats } from '@/hooks/useMapStats';
 import { childrenOf, getPathToRoot } from '@/lib/maps';
+import { enrichGraph } from '@/lib/graph-db';
 import { COL_W, LAYER_H, layoutGraph } from '@/lib/progress';
 import { NODE_STATUS_META, type IdeaNode, type NodeState, type Region } from '@/lib/types';
 
@@ -126,9 +128,49 @@ export default function MapPanel() {
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const openNode = useAppStore((s) => s.openNode);
   const theme = useAppStore((s) => s.theme);
+  const providers = useAppStore((s) => s.providers);
   const data = useMaterialData(activeMaterialId);
   const { ready: statsReady, materials, stats } = useMapStats();
   const rfRef = useRef<ReactFlowInstance | null>(null);
+  const [building, setBuilding] = useState(false);
+  const activeProvider = providers.find((p) => p.isActive) ?? null;
+
+  /**
+   * ИИ-проход графа (улучшение №2): достроить связи между идеями карты.
+   * Существующие рёбра сохраняются; карта обновится сама через useLiveQuery.
+   */
+  const runGraphPass = useCallback(async () => {
+    if (!activeMaterialId || building) return;
+    if (!activeProvider) {
+      toast.error('LLM-провайдер не подключён — настрой его во вкладке «Настройки»');
+      return;
+    }
+    if (data.nodes.length < 2) {
+      toast.info('Для построения связей нужно хотя бы две идеи');
+      return;
+    }
+    setBuilding(true);
+    const tid = toast.loading(
+      `ИИ-проход графа: ищу связи между ${data.nodes.length} идеями…`
+    );
+    try {
+      const r = await enrichGraph(activeProvider, activeMaterialId, {
+        onProgress: (msg) => toast.loading(msg, { id: tid }),
+      });
+      if (r.added === 0 && r.upgraded === 0) {
+        toast.info('Новых связей не нашлось — граф уже полон', { id: tid });
+      } else {
+        toast.success(
+          `Граф дополнен: +${r.added} связей${r.upgraded > 0 ? `, ${r.upgraded} стали обязательными (hard)` : ''}`,
+          { id: tid }
+        );
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось достроить связи графа', { id: tid });
+    } finally {
+      setBuilding(false);
+    }
+  }, [activeMaterialId, activeProvider, building, data.nodes.length]);
 
   const path = useMemo(
     () => (statsReady ? getPathToRoot(materials, activeMaterialId) : []),
@@ -252,6 +294,25 @@ export default function MapPanel() {
           <h1 className="min-w-0 truncate text-lg font-semibold">
             {current?.title ?? 'Карта знаний'}
           </h1>
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0 gap-1.5"
+            onClick={() => void runGraphPass()}
+            disabled={building || !activeProvider || data.nodes.length < 2}
+            title={
+              !activeProvider
+                ? 'Нужен LLM-провайдер (Настройки)'
+                : 'LLM достроит недостающие связи между идеями карты (существующие сохранятся)'
+            }
+          >
+            {building ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Waypoints className="h-4 w-4" />
+            )}
+            <span className="hidden sm:inline">Достроить связи</span>
+          </Button>
         </div>
         {/* Хлебные крошки: путь от корневой карты */}
         {ancestors.length > 0 && (

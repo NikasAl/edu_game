@@ -53,6 +53,7 @@ import {
   type OpenedPdf,
   type PdfDoc,
 } from '@/lib/extract';
+import { enrichGraph } from '@/lib/graph-db';
 import type { EdgeKind, IdeaEdge, IdeaNode, LLMProvider, Material, Region, Task } from '@/lib/types';
 import { normalizeAtomKind } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
@@ -496,10 +497,24 @@ export default function ImportPanel() {
       await db.nodes.bulkPut(nodes);
       await db.edges.bulkPut(edges);
 
+      // ИИ-проход графа: добираем межфрагментные связи, которых не видит
+      // split_into_ideas (рёбра needs строятся только внутри фрагмента).
+      // Не критичен: при сбое остаются рёбра из needs.
+      try {
+        setProgressMsg('ИИ-проход графа: связи между идеями…');
+        setProgressVal(58);
+        const g = await enrichGraph(activeProvider!, materialId, {
+          onProgress: (m) => setProgressMsg(m),
+        });
+        if (g.added > 0) setProgressMsg(`Граф дополнен: ещё ${g.added} связей`);
+      } catch {
+        // проход графа не обязателен — не валим импорт
+      }
+
       // Задачи: последовательно по атомам
       for (let i = 0; i < nodes.length; i++) {
         setProgressMsg(`Генерирую задачи для идеи ${i + 1}/${nodes.length}: «${nodes[i].title}»`);
-        setProgressVal(60 + Math.round((i / nodes.length) * 40));
+        setProgressVal(62 + Math.round((i / nodes.length) * 38));
         try {
           const gen = await genTasksForAtom(
             activeProvider!,

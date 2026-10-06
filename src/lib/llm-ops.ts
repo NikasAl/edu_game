@@ -8,6 +8,7 @@ import { callLLM, type LLMMessage } from './llm-client';
 import { extractJson } from './llm-json';
 import type {
   AtomKind,
+  EdgeKind,
   EssayGrade,
   FeynmanGrade,
   IngestResult,
@@ -546,6 +547,113 @@ export function gradeEssayLocal(expectation: string[], userAnswer: string): Essa
         ? `Косвенная проверка без ИИ: раскрыто ${covered} из ${expectation.length} ключевых пунктов. Подключи LLM-провайдера в настройках для содержательной проверки.`
         : 'У задачи не заданы ключевые пункты ожидаемого ответа (см. редактор узла).',
   };
+}
+
+// ============ 2в. Проход построения графа зависимостей ============
+
+/**
+ * Рёбра из needs при ингесте «замылены»: модель видит только свой фрагмент,
+ * поэтому межфрагментные связи (глава N → глава M) физически не попадают в граф.
+ * Этот проход смотрит на ВСЕ атомы материала и добирает недостающие рёбра.
+ * Атомы идут батчами по ~30 (полные описания), плюс в каждый промпт входит
+ * глобальный каталог названий — модель может связать атомы из разных батчей.
+ */
+export interface GraphEdgeSuggestion {
+  fromId: string;
+  toId: string;
+  kind: EdgeKind;
+}
+
+/** Атомов в одном батче (30 × ~180 знаков описания + каталог ≈ 15k знаков) */
+const GRAPH_BATCH = 30;
+/** Параноидальный предел на ответ: больше — значит модель «полила связями всё» */
+const GRAPH_RAW_CAP = 500;
+
+const GRAPH_PROMPT = `Ты строишь граф зависимостей учебного материала. Даны атомы идей. Найди связи: для освоения идеи to сначала нужно освоить идею from.
+
+Правила:
+- связывай только идеи, которые РЕАЛЬНО зависят друг от друга: to прямо опирается на from — использует его понятие, факт, формулу, метод, опирается на него в рассуждении;
+- kind: "hard" — без from идею to понять или применить нельзя; "soft" — from помогает, но to понятна и без него;
+- рассматривай связи атомов пакета с ЛЮБЫМИ атомами материала, включая атомы вне пакета из общего списка;
+- не более 3–4 связей на атом: значимые связи, а не «всё со всем». Похожие слова сами по себе — не связь;
+- направление: from — базовая идея, to — надстройка. Циклов не создавай.
+
+Верни СТРОГО JSON без пояснений:
+{"edges":[{"from":номер,"to":номер,"kind":"hard|soft"}]}
+Если связей нет — верни {"edges":[]}`;
+
+/**
+ * Построить предложения рёбер для всего материала.
+ * Чистая функция над llm-client: без Dexie — вызывается из graph-db.enrichGraph.
+ * Возвращает уникальные направленные рёбра (встречные пары и дубли отброшены).
+ */
+export async function buildGraphEdgesLLM(
+  provider: LLMProvider,
+  atoms: { id: string; title: string; formulation: string }[],
+  opts: {
+    batchSize?: number;
+    onProgress?: (done: number, total: number) => void;
+  } = {}
+): Promise<GraphEdgeSuggestion[]> {
+  const N = atoms.length;
+  if (N < 2) return [];
+  const batchSize = Math.max(2, opts.batchSize ?? GRAPH_BATCH);
+  const totalBatches = Math.ceil(N / batchSize);
+  const globalIdx = new Map(atoms.map((a, i) => [a.id, i + 1]));
+  const catalog = atoms.map((a, i) => `${i + 1}. ${a.title.slice(0, 80)}`).join('\n');
+
+  const seen = new Set<string>();
+  const out: GraphEdgeSuggestion[] = [];
+  const addEdge = (fromIdx: number, toIdx: number, kind: EdgeKind): void => {
+    if (!Number.isInteger(fromIdx) || !Number.isInteger(toIdx)) return;
+    if (fromIdx < 1 || fromIdx > N || toIdx < 1 || toIdx > N || fromIdx === toIdx) return;
+    const fromId = atoms[fromIdx - 1].id;
+    const toId = atoms[toIdx - 1].id;
+    const key = `${fromId}->${toId}`;
+    if (seen.has(key) || seen.has(`${toId}->${fromId}`)) return; // дубль или встречная пара
+    seen.add(key);
+    out.push({ fromId, toId, kind });
+  };
+
+  for (let start = 0, done = 0; start < N; start += batchSize) {
+    done++;
+    const batchList = atoms
+      .slice(start, start + batchSize)
+      .map((a) => `#${globalIdx.get(a.id)} ${a.title} — ${a.formulation.slice(0, 240)}`)
+      .join('\n');
+    const messages: LLMMessage[] = [
+      { role: 'system', content: SYSTEM },
+      {
+        role: 'user',
+        content: `${GRAPH_PROMPT}\n\nАТОМЫ ПАКЕТА (полные описания):\n${batchList}\n\nВСЕ АТОМЫ МАТЕРИАЛА (номер. название — связи могут вести и на них):\n${catalog}`,
+      },
+    ];
+    const parsed = await callLLMJson<{ edges?: unknown }>(provider, messages, {
+      op: 'build_graph',
+      temperature: 0.1,
+      maxTokens: 8000,
+      validate: (p) => {
+        const list = Array.isArray(p) ? p : p.edges;
+        if (!Array.isArray(list)) return 'нет массива edges';
+        if (list.length > GRAPH_RAW_CAP) return 'подозрительно много связей — оставь только значимые';
+        for (const e of list) {
+          if (!e || typeof e !== 'object' || Array.isArray(e)) return 'элемент edges не объект';
+          const from = (e as Record<string, unknown>).from;
+          const to = (e as Record<string, unknown>).to;
+          if (!Number.isInteger(from) || !Number.isInteger(to)) return 'from/to должны быть целыми номерами';
+        }
+        return null;
+      },
+    });
+    const list = (Array.isArray(parsed) ? parsed : (parsed.edges ?? [])) as Record<string, unknown>[];
+    for (const e of list) {
+      // мусорный kind трактуем как hard — так же, как needs при ингесте;
+      // выход за диапазон/самосвязи/дубли отсеет addEdge
+      addEdge(e.from as number, e.to as number, e.kind === 'soft' ? 'soft' : 'hard');
+    }
+    opts.onProgress?.(done, totalBatches);
+  }
+  return out;
 }
 
 // ============ 3. Проверка фейнмановского объяснения ============
