@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowRight,
+  BookOpen,
   Check,
   ChevronDown,
   ChevronRight,
@@ -44,14 +45,18 @@ import { hasCycle } from '@/lib/progress';
 import { normalizeText } from '@/lib/safeMath';
 import { getPathToRoot, nextOrderIndex } from '@/lib/maps';
 import {
+  djvuPageSpans,
+  extractFromDjvu,
   extractFromPdf,
   extractFromUrl,
+  openDjvu,
   openPdf,
   pdfPageSpans,
+  renderDjvuPageToDataUrl,
   renderPdfPageToDataUrl,
   type ExtractedSection,
+  type OpenedDjvu,
   type OpenedPdf,
-  type PdfDoc,
 } from '@/lib/extract';
 import { enrichGraph } from '@/lib/graph-db';
 import type { EdgeKind, IdeaEdge, IdeaNode, LLMProvider, Material, Region, Task } from '@/lib/types';
@@ -59,10 +64,42 @@ import { normalizeAtomKind } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 
 type Phase = 'input' | 'extract' | 'pdfOcr' | 'parsing' | 'review' | 'tasks';
-type SourceMode = 'paste' | 'url' | 'pdf';
+type SourceMode = 'paste' | 'url' | 'pdf' | 'djvu';
 
-/** Диапазон страниц PDF для OCR-режима */
+/** Диапазон страниц документа для OCR-режима */
 type OcrSpan = { id: string; title: string; from: number; to: number };
+
+/**
+ * Единый доступ к страницам документа для OCR-фазы: PDF (pdf.js) и DjVu (djvu.js)
+ * выглядят для неё одинаково. Для DjVu рендеры сериализуются цепочкой промисов —
+ * декодер библиотеки синхронный, параллельные запросы всё равно выстроились бы в один поток.
+ */
+interface OcrDocAdapter {
+  numPages: number;
+  renderPage(pageNumber: number, maxWidth: number, quality: number): Promise<string>;
+  destroy(): void;
+}
+
+function makePdfOcrAdapter(opened: OpenedPdf): OcrDocAdapter {
+  return {
+    numPages: opened.doc.numPages,
+    renderPage: (page, maxWidth, quality) => renderPdfPageToDataUrl(opened.doc, page, maxWidth, quality),
+    destroy: () => void opened.destroy(),
+  };
+}
+
+function makeDjvuOcrAdapter(opened: OpenedDjvu): OcrDocAdapter {
+  let chain: Promise<unknown> = Promise.resolve();
+  return {
+    numPages: opened.doc.getPagesQuantity(),
+    renderPage: (page, maxWidth, quality) => {
+      const next = chain.then(() => renderDjvuPageToDataUrl(opened.doc, page, maxWidth, quality));
+      chain = next.catch(() => undefined); // очередь живёт даже после сбойного рендера
+      return next;
+    },
+    destroy: () => opened.destroy(),
+  };
+}
 
 /**
  * Разрешение картинки, отправляемой в vision-модель на распознавание.
@@ -124,9 +161,12 @@ export default function ImportPanel() {
   const [urlBusy, setUrlBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
+  const [djvuBusy, setDjvuBusy] = useState(false);
+  const djvuInputRef = useRef<HTMLInputElement>(null);
 
-  // LLM OCR для PDF (сканы / сломанный текстовый слой)
+  // LLM OCR для PDF и DjVu (сканы / сломанный текстовый слой)
   const [pdfOcrMode, setPdfOcrMode] = useState(false);
+  const [djvuOcrMode, setDjvuOcrMode] = useState(false);
   const [ocrSpans, setOcrSpans] = useState<OcrSpan[]>([]);
   // выбор ПОСТРАНИЧНЫЙ: пользователь может взять отдельные страницы из группы
   const [ocrSelectedPages, setOcrSelectedPages] = useState<Set<number>>(new Set());
@@ -137,9 +177,10 @@ export default function ImportPanel() {
   const [ocrNumPages, setOcrNumPages] = useState(0);
   const [ocrSource, setOcrSource] = useState('');
   const [ocrBusy, setOcrBusy] = useState(false);
-  const pdfDocRef = useRef<OpenedPdf | null>(null);
-  /** PDF-документ для рендера (реактивная копия ref — доступна в JSX) */
-  const [ocrDoc, setOcrDoc] = useState<PdfDoc | null>(null);
+  /** Открытый документ (PDF или DjVu) — держится ради destroy */
+  const ocrDocRef = useRef<OcrDocAdapter | null>(null);
+  /** Реактивная копия — доступна в JSX (миниатюры/предпросмотр) */
+  const [ocrDoc, setOcrDoc] = useState<OcrDocAdapter | null>(null);
   const ocrCancelRef = useRef(false);
 
   // OCR-провайдер — тот же, что и для «OCR с фото» (Настройки → OCR с фото)
@@ -155,11 +196,12 @@ export default function ImportPanel() {
     return ocrModel.trim() ? { ...base, model: ocrModel.trim() } : base;
   }, [ocrProviderId, ocrModel, providers, activeProvider]);
 
-  // закрыть PDF при уходе со вкладки — иначе воркер pdf.js остаётся в памяти
+  // закрыть документ (PDF/DjVu) при уходе со вкладки — иначе воркер pdf.js и
+  // декодер djvu.js остаются в памяти
   useEffect(
     () => () => {
-      void pdfDocRef.current?.destroy();
-      pdfDocRef.current = null;
+      ocrDocRef.current?.destroy();
+      ocrDocRef.current = null;
     },
     []
   );
@@ -260,8 +302,8 @@ export default function ImportPanel() {
         // LLM OCR: открыть документ, показать диапазоны страниц для выбора
         setProgressMsg('Открываю PDF…');
         const opened = await openPdf(buf);
-        pdfDocRef.current = opened;
-        setOcrDoc(opened.doc);
+        ocrDocRef.current = makePdfOcrAdapter(opened);
+        setOcrDoc(ocrDocRef.current);
         const info = await pdfPageSpans(opened.doc, file.name);
         setOcrSource(file.name);
         setOcrNumPages(info.numPages);
@@ -285,10 +327,43 @@ export default function ImportPanel() {
     }
   };
 
-  const closePdfDoc = () => {
-    void pdfDocRef.current?.destroy();
-    pdfDocRef.current = null;
+  const closeOcrDoc = () => {
+    ocrDocRef.current?.destroy();
+    ocrDocRef.current = null;
     setOcrDoc(null);
+  };
+
+  const runDjvu = async (file: File) => {
+    setDjvuBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      if (djvuOcrMode) {
+        // LLM OCR: открыть документ, показать диапазоны страниц для выбора
+        setProgressMsg('Открываю DjVu…');
+        const opened = await openDjvu(buf);
+        ocrDocRef.current = makeDjvuOcrAdapter(opened);
+        setOcrDoc(ocrDocRef.current);
+        const info = djvuPageSpans(opened.doc, file.name);
+        setOcrSource(file.name);
+        setOcrNumPages(info.numPages);
+        setOcrSpans(info.spans.map((s, i) => ({ ...s, id: `sp${i}` })));
+        setOcrExpandedGroups(new Set());
+        setExtractTitle(info.title);
+        // маленькие документы отмечаем целиком, большие — выбор за пользователем
+        setOcrSelectedPages(
+          info.numPages <= 6 ? new Set(Array.from({ length: info.numPages }, (_, i) => i + 1)) : new Set()
+        );
+        setPhase('pdfOcr');
+      } else {
+        setProgressMsg('Читаю DjVu…');
+        const res = await extractFromDjvu(buf, file.name, setProgressMsg);
+        openExtract(res, file.name);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось разобрать DjVu');
+    } finally {
+      setDjvuBusy(false);
+    }
   };
 
   const toggleOcrPage = (page: number) => {
@@ -346,10 +421,9 @@ export default function ImportPanel() {
     return groups;
   }, [ocrSpans, ocrNumPages]);
 
-  const runPdfOcr = async () => {
-    const opened = pdfDocRef.current;
-    if (!opened) return;
-    const doc = opened.doc;
+  const runOcr = async () => {
+    const adapter = ocrDocRef.current;
+    if (!adapter) return;
     if (!ocrProvider) {
       toast.error('Нужен LLM-провайдер с vision-моделью — настрой его в «Настройки → OCR с фото»');
       return;
@@ -371,7 +445,7 @@ export default function ImportPanel() {
       let cancelled = false;
       for (const sp of ocrSpans) {
         if (cancelled) break;
-        const lastPage = Math.min(sp.to, doc.numPages);
+        const lastPage = Math.min(sp.to, adapter.numPages);
         const pagesInSpan = selected.filter((p) => p >= sp.from && p <= lastPage);
         if (pagesInSpan.length === 0) continue;
         const texts: string[] = [];
@@ -382,7 +456,7 @@ export default function ImportPanel() {
           }
           setProgressMsg(`OCR: страница ${p} (${done + 1}/${selected.length})…`);
           try {
-            const dataUrl = await renderPdfPageToDataUrl(doc, p, OCR_RENDER_WIDTH, OCR_RENDER_QUALITY);
+            const dataUrl = await adapter.renderPage(p, OCR_RENDER_WIDTH, OCR_RENDER_QUALITY);
             const text = await ocrTextbookPage(ocrProvider, dataUrl);
             texts.push(text.trim().length > 0 ? text : `[страница ${p}: модель вернула пустой ответ]`);
           } catch (e) {
@@ -418,7 +492,7 @@ export default function ImportPanel() {
       }
     } finally {
       setOcrBusy(false);
-      closePdfDoc();
+      closeOcrDoc();
     }
   };
 
@@ -578,6 +652,7 @@ export default function ImportPanel() {
     { id: 'paste', label: 'Текст', icon: Type },
     { id: 'url', label: 'Ссылка', icon: Link2 },
     { id: 'pdf', label: 'PDF', icon: FileText },
+    { id: 'djvu', label: 'DjVu', icon: BookOpen },
   ];
 
   return (
@@ -585,8 +660,8 @@ export default function ImportPanel() {
       <header>
         <h1 className="text-lg font-semibold">Импорт материала</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Вставь текст, укажи ссылку на статью или загрузи PDF — LLM выделит атомы идей, построит граф зависимостей
-          и сгенерирует задания.
+          Вставь текст, укажи ссылку на статью или загрузи PDF/DjVu — LLM выделит атомы идей, построит граф
+          зависимостей и сгенерирует задания.
         </p>
       </header>
 
@@ -766,14 +841,14 @@ export default function ImportPanel() {
                     setOcrSpans([]);
                     setOcrSelectedPages(new Set());
                     setOcrExpandedGroups(new Set());
-                    closePdfDoc();
+                    closeOcrDoc();
                   }}
                 >
                   Отмена
                 </Button>
                 <Button
                   className="flex-1"
-                  onClick={() => void runPdfOcr()}
+                  onClick={() => void runOcr()}
                   disabled={ocrSelectedCount === 0 || !ocrProvider}
                 >
                   <ScanText className="mr-1 h-4 w-4" /> Распознать ({ocrSelectedCount} стр.)
@@ -1047,6 +1122,65 @@ export default function ImportPanel() {
               </div>
             )}
 
+            {sourceMode === 'djvu' && (
+              <div className="flex flex-col gap-2 rounded-xl border border-border/70 bg-muted/30 p-3">
+                <input
+                  ref={djvuInputRef}
+                  type="file"
+                  accept=".djvu,.djv,image/vnd.djvu"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void runDjvu(f);
+                    e.target.value = '';
+                  }}
+                />
+                <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted/60 p-1">
+                  <button
+                    onClick={() => setDjvuOcrMode(false)}
+                    disabled={djvuBusy}
+                    className={`flex min-h-[34px] items-center justify-center gap-1.5 rounded-md px-2 text-xs transition-colors ${
+                      !djvuOcrMode
+                        ? 'bg-card font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    aria-pressed={!djvuOcrMode}
+                  >
+                    Текстовый слой
+                  </button>
+                  <button
+                    onClick={() => setDjvuOcrMode(true)}
+                    disabled={djvuBusy}
+                    className={`flex min-h-[34px] items-center justify-center gap-1.5 rounded-md px-2 text-xs transition-colors ${
+                      djvuOcrMode
+                        ? 'bg-card font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    aria-pressed={djvuOcrMode}
+                  >
+                    <ScanText className="h-4 w-4 shrink-0" />
+                    LLM OCR
+                  </button>
+                </div>
+                <Button className="w-full" onClick={() => djvuInputRef.current?.click()} disabled={djvuBusy}>
+                  {djvuBusy ? (
+                    <>
+                      <Loader2 className="mr-1 h-4 w-4 animate-spin" /> {progressMsg || 'Читаю DjVu…'}
+                    </>
+                  ) : (
+                    <>
+                      <BookOpen className="mr-1 h-4 w-4" /> Выбрать DjVu-файл
+                    </>
+                  )}
+                </Button>
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {djvuOcrMode
+                    ? 'Страницы распознаёт vision-модель — в точности как «LLM OCR» у PDF: формулы переводятся в LaTeX, колонтитулы отбрасываются. Большинство DjVu — старые сканы без текстового слоя. После выбора файла отметь нужные страницы.'
+                    : 'Текст берётся из скрытого слоя DjVu — он есть, только если книга уже проходила распознавание. Оглавление даст разделы, иначе — по страницам. Если текста нет — переключись на «LLM OCR».'}
+                </p>
+              </div>
+            )}
+
             <div>
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Название материала</label>
               <Input
@@ -1241,7 +1375,7 @@ function ReviewList({ onBack, onSave }: { onBack: () => void; onSave: () => void
   );
 }
 
-/** Миниатюра страницы PDF с ленивой отрисовкой по мере прокрутки */
+/** Миниатюра страницы документа (PDF/DjVu) с ленивой отрисовкой по мере прокрутки */
 function PageThumb({
   doc,
   page,
@@ -1249,7 +1383,7 @@ function PageThumb({
   onToggle,
   onPreview,
 }: {
-  doc: PdfDoc | null;
+  doc: OcrDocAdapter | null;
   page: number;
   selected: boolean;
   onToggle: () => void;
@@ -1265,7 +1399,8 @@ function PageThumb({
     if (!el) return;
     let cancelled = false;
     const render = () => {
-      void renderPdfPageToDataUrl(doc, page, 340, 0.72)
+      void doc
+        .renderPage(page, 340, 0.72)
         .then((url) => {
           if (!cancelled) setThumb(url);
         })
@@ -1335,13 +1470,14 @@ function PageThumb({
 
 /** Полный предпросмотр страницы: рендер с тем же качеством, что и для OCR.
  *  Монтируется с key={page} — состояние сбрасывается при смене страницы. */
-function OcrPagePreview({ doc, page }: { doc: PdfDoc; page: number }) {
+function OcrPagePreview({ doc, page }: { doc: OcrDocAdapter; page: number }) {
   const [img, setImg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    void renderPdfPageToDataUrl(doc, page, OCR_RENDER_WIDTH, OCR_RENDER_QUALITY)
+    void doc
+      .renderPage(page, OCR_RENDER_WIDTH, OCR_RENDER_QUALITY)
       .then((url) => {
         if (!cancelled) setImg(url);
       })
