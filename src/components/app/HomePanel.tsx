@@ -8,6 +8,7 @@ import {
   ArrowRight,
   BookOpen,
   ChevronRight,
+  History,
   Map as MapIcon,
   Sparkles,
   TriangleAlert,
@@ -19,6 +20,7 @@ import { useMapStats } from '@/hooks/useMapStats';
 import { childrenOf, getPathToRoot } from '@/lib/maps';
 import MathText from '@/components/MathText';
 import { getMeta, setMeta } from '@/lib/db';
+import { dueReviews, fmtDay, nextUpcomingReview } from '@/lib/srs';
 import { useEffect, useMemo, useState } from 'react';
 import type { IdeaNode } from '@/lib/types';
 
@@ -43,6 +45,18 @@ export default function HomePanel() {
   const childMaps = useMemo(
     () => (statsReady && activeMaterialId ? childrenOf(materials, activeMaterialId) : []),
     [statsReady, materials, activeMaterialId]
+  );
+
+  // SRS: что пора повторить и что ждёт впереди (по попыткам активной карты).
+  // Хуки до раннего return загрузки — data в этом случае отдаёт пустые массивы.
+  const srsNow = useMemo(() => new Date(), [data.ready]);
+  const srsDue = useMemo(
+    () => dueReviews(data.nodes, data.tasks, data.attempts, srsNow),
+    [data.nodes, data.tasks, data.attempts, srsNow]
+  );
+  const srsUpcoming = useMemo(
+    () => nextUpcomingReview(data.nodes, data.tasks, data.attempts, srsNow),
+    [data.nodes, data.tasks, data.attempts, srsNow]
   );
 
   if (!data.ready || !statsReady) {
@@ -151,6 +165,44 @@ export default function HomePanel() {
             Нет доступных узлов. Загрузи материал во вкладке «Импорт».
           </CardContent>
         </Card>
+      )}
+
+      {/* Пора повторить (SRS) */}
+      {srsDue.length > 0 && (
+        <section aria-label="Повторение">
+          <h2 className="mb-2 px-1 text-sm font-medium text-muted-foreground">Пора повторить</h2>
+          <Card className="border-sky-500/40 bg-sky-500/5">
+            <CardContent className="flex flex-col gap-2 p-4">
+              <div className="flex items-center gap-2 text-xs font-medium text-sky-400">
+                <History className="h-4 w-4" />
+                Ждут повторения: {srsDue.length} · зачёт продлит интервал, провал вернёт идею в работу
+              </div>
+              {srsDue.slice(0, 5).map(({ node, info }) => (
+                <button
+                  key={node.id}
+                  onClick={() => openNode(node.id)}
+                  className="flex items-center gap-3 rounded-lg border border-sky-500/20 bg-background/40 p-2.5 text-left transition-colors hover:border-sky-500/50"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{node.title}</p>
+                    <p className="text-xs text-muted-foreground">
+                      освоено {fmtDay(info.masteredAt)} · интервал {info.intervalDays} дн.
+                    </p>
+                  </div>
+                  <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                </button>
+              ))}
+              {srsDue.length > 5 && (
+                <p className="px-1 text-xs text-muted-foreground">…и ещё {srsDue.length - 5} — открой узел из списка выше</p>
+              )}
+            </CardContent>
+          </Card>
+        </section>
+      )}
+      {srsDue.length === 0 && srsUpcoming && (
+        <p className="px-1 text-xs text-muted-foreground">
+          Ближайшее повторение: {fmtDay(srsUpcoming.info.dueAt)} — «{srsUpcoming.node.title}»
+        </p>
       )}
 
       {/* Подкарты: входы в дочерние карты */}

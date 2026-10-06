@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, Lightbulb, Map as MapIcon, PencilLine, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
+import { ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, History, Lightbulb, Map as MapIcon, PencilLine, Play, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,7 @@ import { useMaterialData } from '@/hooks/useMaterialData';
 import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
 import { checkAnswer, instantiateTask, isParametric, taskProblems } from '@/lib/task-engine';
 import { checkEssayLLM, gradeEssayLocal, gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
+import { computeSrsForNode, fmtDay, intervalFor, SRS_LADDER_DAYS, type SrsInfo } from '@/lib/srs';
 import type { Attempt, EssayGrade, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -52,6 +53,13 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
     for (const a of sorted) map.set(`${a.kind}|${a.taskId ?? ''}`, a);
     return map;
   }, [bundle?.attempts]);
+
+  // SRS: расписание повторения освоенного узла (null — узел не освоен/не освоиваем)
+  const now = useMemo(() => new Date(), [nodeId]);
+  const srsInfo = useMemo(
+    () => (bundle?.node ? computeSrsForNode(bundle.node, bundle.tasks, bundle.attempts, now) : null),
+    [bundle, now]
+  );
 
   if (!bundle?.node || !data.ready) {
     return (
@@ -155,6 +163,9 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
               </CardContent>
             </Card>
           )}
+
+          {/* Повторение (SRS): мини-задача, когда пора освежить память */}
+          {srsInfo && <ReviewCard node={node} tasks={tasks} info={srsInfo} now={now} provider={activeProvider} />}
 
           {/* Испытание 1: Фейнман */}
           <FeynmanTrial key={`f:${nodeId}`} node={node} attempt={feynmanA} provider={activeProvider} />
@@ -823,6 +834,245 @@ function OwnTaskTrial({
             )}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ============ Повторение (SRS) ============
+
+function daysUntil(dueAt: Date, now: Date): number {
+  return Math.ceil((dueAt.getTime() - now.getTime()) / 86_400_000);
+}
+
+/**
+ * Карточка интервального повторения освоенного узла.
+ * Зачёт → попытка kind='review' (продвигает лестницу интервалов),
+ * провал → попытка kind='task' с провалом (снимает освоенность узла).
+ */
+function ReviewCard({
+  node,
+  tasks,
+  info,
+  now,
+  provider,
+}: {
+  node: IdeaNode;
+  tasks: Task[];
+  info: SrsInfo;
+  now: Date;
+  provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
+}) {
+  const [reviewTaskId, setReviewTaskId] = useState<string | null>(null);
+  const [input, setInput] = useState('');
+  const [choiceIdx, setChoiceIdx] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(null);
+  const [essayGrade, setEssayGrade] = useState<EssayGrade | null>(null);
+  // интервал, зафиксированный в момент зачёта (info после записи попытки
+  // уже учтёт зачёт — считать от него было бы двойным увеличением)
+  const [passNextDays, setPassNextDays] = useState<number | null>(null);
+
+  // Пул задач для проверки памяти: не битые; choice не предпочитаем — правильный
+  // вариант виден выше в зачтённой задаче
+  const pool = useMemo(() => {
+    const ok = tasks.filter((t) => taskProblems(t).length === 0);
+    const pref = ok.filter((t) => t.type !== 'choice');
+    return (pref.length > 0 ? pref : ok).map((t) => t.id);
+  }, [tasks]);
+
+  const reviewTask = tasks.find((t) => t.id === reviewTaskId) ?? null;
+  const instance = useMemo(() => (reviewTask ? instantiateTask(reviewTask) : null), [reviewTask]);
+  const isEssay = reviewTask?.type === 'essay';
+  const isCode = reviewTask?.type === 'code_output' || reviewTask?.type === 'code_fill';
+  const choiceSpec = reviewTask?.answerSpec.kind === 'choice' ? reviewTask.answerSpec : null;
+
+  const start = () => {
+    if (pool.length === 0) return;
+    setReviewTaskId(pool[Math.floor(Math.random() * pool.length)]);
+    setInput('');
+    setChoiceIdx(null);
+    setVerdict(null);
+    setEssayGrade(null);
+  };
+
+  const submit = async () => {
+    if (!reviewTask || !instance) return;
+    // интервал, который получит узел этим зачётом (info ещё «до зачёта»)
+    const nextDays = intervalFor(info.reviewsDone + 1);
+    if (isEssay) {
+      const answer = input.trim();
+      if (answer.length < 10) {
+        toast.error('Напиши развёрнутый ответ своими словами');
+        return;
+      }
+      setBusy(true);
+      try {
+        const grade = provider
+          ? await checkEssayLLM(provider, reviewTask, node, answer)
+          : gradeEssayLocal(reviewTask.answerSpec.kind === 'essay' ? reviewTask.answerSpec.expectation : [], answer);
+        setEssayGrade(grade);
+        setVerdict(grade.verdict);
+        if (grade.verdict === 'pass') setPassNextDays(nextDays);
+        await db.attempts.put({
+          id: crypto.randomUUID(),
+          materialId: node.materialId,
+          nodeId: node.id,
+          // зачёт повторения — отдельный вид попытки; провал падает в задачу
+          // и существующими правилами снимает освоенность узла
+          kind: grade.verdict === 'pass' ? 'review' : 'task',
+          taskId: reviewTask.id,
+          userAnswer: answer,
+          verdict: grade.verdict,
+          score: grade.score,
+          feedback: grade.feedback,
+          details: JSON.stringify({ missed: grade.missed, srs: true }),
+          createdAt: new Date(),
+        });
+        if (grade.verdict === 'pass') toast.success('Память свежая — интервал продлён!');
+        else toast.error('Идея забылась — узел снова в работе');
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'Ошибка проверки');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    const userInput = reviewTask.type === 'choice' ? String(choiceIdx ?? -1) : input;
+    const res = checkAnswer(instance, reviewTask.answerSpec, userInput);
+    await db.attempts.put({
+      id: crypto.randomUUID(),
+      materialId: node.materialId,
+      nodeId: node.id,
+      kind: res.verdict === 'pass' ? 'review' : 'task',
+      taskId: reviewTask.id,
+      userAnswer:
+        reviewTask.type === 'choice'
+          ? choiceSpec
+            ? choiceSpec.options[choiceIdx ?? -1] ?? '—'
+            : userInput
+          : userInput,
+      verdict: res.verdict,
+      details: JSON.stringify({ srs: true }),
+      createdAt: new Date(),
+    });
+    setVerdict(res.verdict);
+    if (res.verdict === 'pass') setPassNextDays(nextDays);
+    if (res.verdict === 'pass') toast.success('Память свежая — интервал продлён!');
+    else toast.error('Идея забылась — узел снова в работе');
+  };
+
+  return (
+    <Card className={info.due ? 'border-sky-500/40 bg-sky-500/5' : undefined}>
+      <CardContent className="flex flex-col gap-3 p-4">
+        <div className="flex items-center gap-2">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-sky-500/15 text-sky-400">
+            <History className="h-4 w-4" />
+          </span>
+          <p className="text-sm font-semibold">Повторение</p>
+          <span className="ml-auto text-[10px] text-muted-foreground">
+            {info.reviewsDone > 0 ? `повторений: ${info.reviewsDone} · ` : ''}интервал {info.intervalDays} дн.
+          </span>
+        </div>
+
+        {!reviewTask && (
+          info.due ? (
+            <>
+              <p className="text-sm leading-snug text-muted-foreground">
+                Идея освоена {fmtDay(info.masteredAt)} — пора освежить память. Ответь на одну задачу из узла: зачёт
+                продлит интервал, провал вернёт идею в работу.
+              </p>
+              <Button size="sm" className="self-start" onClick={start} disabled={pool.length === 0}>
+                <Play className="mr-1 h-4 w-4" /> Проверить память
+              </Button>
+            </>
+          ) : (
+            <p className="text-sm leading-snug text-muted-foreground">
+              Следующее повторение: <b className="text-foreground">{fmtDay(info.dueAt)}</b>
+              {` `}(через {daysUntil(info.dueAt, now)} дн.).
+            </p>
+          )
+        )}
+
+        {reviewTask && instance && (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm leading-snug">
+              <RichText>{instance.renderedPrompt}</RichText>
+            </p>
+            {isCode && reviewTask.code && <CodeBlock code={reviewTask.code} />}
+
+            {choiceSpec ? (
+              <div className="flex flex-col gap-1.5">
+                {choiceSpec.options.map((opt, i) => (
+                  <button
+                    key={i}
+                    disabled={busy || verdict !== null}
+                    onClick={() => setChoiceIdx(i)}
+                    className={cn(
+                      'rounded-lg border px-3 py-2.5 text-left text-sm transition-colors',
+                      choiceIdx === i ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/40'
+                    )}
+                  >
+                    <RichText>{opt}</RichText>
+                  </button>
+                ))}
+              </div>
+            ) : isEssay ? (
+              <Textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                disabled={busy || verdict !== null}
+                placeholder="Краткий ответ своими словами…"
+                rows={4}
+                className="resize-none"
+              />
+            ) : (
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && verdict === null && !busy && submit()}
+                disabled={busy || verdict !== null}
+                placeholder={isCode ? 'Вывод программы' : 'Ответ'}
+                inputMode="text"
+                className={cn(
+                  'h-10 rounded-lg border border-input bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-primary',
+                  isCode && 'font-mono'
+                )}
+              />
+            )}
+
+            {verdict === null && (
+              <Button size="sm" className="self-start" onClick={submit} disabled={busy}>
+                {busy ? 'Проверяем…' : 'Ответить'}
+              </Button>
+            )}
+
+            {verdict === 'pass' && (
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-sm text-emerald-300">
+                Память свежая! Следующее повторение — через {passNextDays ?? info.intervalDays} дн.
+              </div>
+            )}
+            {verdict === 'fail' && isEssay && essayGrade && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-3">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant="secondary" className="gap-1">Раскрыто {Math.round(essayGrade.score * 100)}%</Badge>
+                  <span className="ml-auto flex items-center gap-1 text-xs font-medium text-amber-400">
+                    <XCircle className="h-4 w-4" /> идея забылась
+                  </span>
+                </div>
+                {essayGrade.feedback && (
+                  <p className="mt-1.5 leading-snug text-muted-foreground">
+                    <RichText>{essayGrade.feedback}</RichText>
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <p className="text-[11px] leading-snug text-muted-foreground/80">
+          Зачёты повторений продлевают интервал: {SRS_LADDER_DAYS.join(' → ')} дней. Провал возвращает идею в работу.
+        </p>
       </CardContent>
     </Card>
   );

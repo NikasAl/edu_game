@@ -205,7 +205,12 @@ export interface TaskInstance {
 
 // ============ Попытки и прогресс ============
 
-export type AttemptKind = 'feynman' | 'task' | 'own';
+/**
+ * kind='review' — зачёт SRS-повторения освоенного узла (не влияет на испытания,
+ * только на расписание повторений). Провал повторения записывается как обычный
+ * провал задачи (kind='task') — это снимает освоенность узла.
+ */
+export type AttemptKind = 'feynman' | 'task' | 'own' | 'review';
 export type Verdict = 'pass' | 'fail' | 'pending';
 
 export interface Attempt {
