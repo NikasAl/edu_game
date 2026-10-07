@@ -44,7 +44,25 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills"]
+  ignores: [
+    "node_modules/**",
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+    "examples/**",
+    "skills/**",
+    // не-проектные каталоги воркспейса и артефакты/vendor-бандлы:
+    // линтовать их бессмысленно, шум тонет (было ~8700 ложных проблем)
+    "_staging/**",
+    "scripts/**",
+    "tools/**",
+    "android/**",
+    "ios/**",
+    "public/wasm/**",
+    "public/*.mjs",
+    "public/preinstalled/**",
+  ]
 }];
 
 export default eslintConfig;

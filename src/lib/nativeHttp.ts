@@ -204,5 +204,3 @@ export async function nativeRequest(
     throw err;
   }
 }
-
-void ({} as PluginListenerHandle | null);

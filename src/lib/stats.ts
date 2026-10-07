@@ -152,7 +152,8 @@ export function computeStats(bundle: StatsBundle, windowDays = 28, now = new Dat
   for (const a of attempts) {
     if (a.verdict === 'pass') attemptsPass++;
     else if (a.verdict === 'fail') attemptsFail++;
-    const tr = trials[a.kind];
+    // 'review' — SRS-повторение, в статистику испытаний не входит
+    const tr = a.kind === 'review' ? undefined : trials[a.kind];
     if (tr) {
       tr.attempts++;
       if (a.verdict === 'pass') tr.passes++;

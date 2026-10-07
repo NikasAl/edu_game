@@ -178,6 +178,5 @@ export const useAppStore = create<AppState>((set, get) => ({
     const savedTheme = (typeof localStorage !== 'undefined' ? localStorage.getItem('edu-theme') : null) as Theme | null;
     if (savedTheme === 'light' || savedTheme === 'dark') get().setTheme(savedTheme);
     else get().setTheme('dark');
-    void setMeta;
   },
 }));

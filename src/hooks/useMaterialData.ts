@@ -4,7 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useMemo } from 'react';
 import { db } from '@/lib/db';
 import { computeNodeStates, computeDepths, recommendNext } from '@/lib/progress';
-import type { IdeaNode } from '@/lib/types';
+import type { IdeaNode, NodeState } from '@/lib/types';
 
 /**
  * Живые данные активного материала: узлы, рёбра, задачи, попытки,
@@ -26,7 +26,8 @@ export function useMaterialData(materialId: string | null) {
 
   return useMemo(() => {
     if (!bundle) {
-      return { ready: false as const, nodes: [], regions: [], material: null, states: new Map(), depths: new Map(), nextNode: null, tasks: [], edges: [], attempts: [] };
+      // типизированные пустые Map: иначе в union-типе states деградирует до any
+      return { ready: false as const, nodes: [] as IdeaNode[], regions: [], material: null, states: new Map<string, NodeState>(), depths: new Map<string, number>(), nextNode: null, tasks: [], edges: [], attempts: [] };
     }
     const { nodes, edges, tasks, attempts, regions, material } = bundle;
     const states = computeNodeStates({ nodes, edges, tasks, attempts });

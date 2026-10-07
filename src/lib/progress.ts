@@ -201,28 +201,22 @@ export function layoutGraph(
 
 /** Проверка ацикличности графа hard-рёбер (для валидации при ингесте) */
 export function hasCycle(nodes: IdeaNode[], edges: IdeaEdge[]): boolean {
-  try {
-    const depths = new Map<string, number>();
-    const deps = buildDeps(edges);
-    const visiting = new Set<string>();
-    const done = new Set<string>();
-    function visit(id: string): boolean {
-      if (done.has(id)) return false;
-      if (visiting.has(id)) return true;
-      visiting.add(id);
-      for (const dep of deps.get(id) ?? []) {
-        if (dep.kind === 'hard' && visit(dep.id)) return true;
-      }
-      visiting.delete(id);
-      done.add(id);
-      return false;
+  const deps = buildDeps(edges);
+  const visiting = new Set<string>();
+  const done = new Set<string>();
+  function visit(id: string): boolean {
+    if (done.has(id)) return false;
+    if (visiting.has(id)) return true;
+    visiting.add(id);
+    for (const dep of deps.get(id) ?? []) {
+      if (dep.kind === 'hard' && visit(dep.id)) return true;
     }
-    for (const n of nodes) {
-      if (visit(n.id)) return true;
-      void depths;
-    }
-    return false;
-  } catch {
+    visiting.delete(id);
+    done.add(id);
     return false;
   }
+  for (const n of nodes) {
+    if (visit(n.id)) return true;
+  }
+  return false;
 }

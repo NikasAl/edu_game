@@ -5,9 +5,8 @@ import type { NextConfig } from "next";
 // напрямую с клиента (в браузере — fetch, в APK — native HTTP без CORS).
 const nextConfig: NextConfig = {
   output: "export",
-  typescript: {
-    ignoreBuildErrors: true,
-  },
+  // Типы проверяются на сборке: tsconfig excludes не-проектные каталоги
+  // (skills/, tools/, _staging/ и т.д.), поэтому tsc проходит чисто.
   reactStrictMode: false,
 };
 
