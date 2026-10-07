@@ -342,6 +342,29 @@ export interface BackupPayload {
   drafts?: NodeDraft[];
 }
 
+/**
+ * Формат экспорта курса: карта (опционально вместе с вложенными картами)
+ * и всё её содержимое — без пользовательского прогресса: попытки, зачёты,
+ * черновики и LLM-провайдеры не включаются.
+ * Импорт всегда создаёт копию с новыми id, поэтому комплект можно
+ * вливать в базу многократно и без конфликтов.
+ */
+export interface CoursePayload {
+  app: 'edu_game';
+  kind: 'course';
+  version: number;
+  /** Стабильный id комплекта — ключ дедупликации предустановленных курсов */
+  bundleId: string;
+  exportedAt: string;
+  /** Название корневой карты (для манифеста предустановленных курсов) */
+  title: string;
+  materials: Material[];
+  regions: Region[];
+  nodes: IdeaNode[];
+  edges: IdeaEdge[];
+  tasks: Task[];
+}
+
 export const NODE_STATUS_META: Record<
   NodeStatus,
   { label: string; color: string; ring: string; bg: string }

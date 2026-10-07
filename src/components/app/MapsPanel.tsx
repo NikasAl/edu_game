@@ -6,12 +6,15 @@
  * Карта — контейнер связанных идей; дерево задаётся Material.parentId.
  * Операции по карте открываются компактными диалогами поверх страницы.
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
   ChevronDown,
   ChevronRight,
+  Check,
   CornerDownRight,
+  FileDown,
+  FileUp,
   Map as MapIcon,
   Pencil,
   Plus,
@@ -33,6 +36,13 @@ import { useAppStore } from '@/store/useAppStore';
 import { useMapStats } from '@/hooks/useMapStats';
 import { createMap, moveMap, renameMap, childrenOf, getPathToRoot } from '@/lib/maps';
 import { deleteMapCascade } from '@/lib/db';
+import {
+  buildCourseBundle,
+  courseFileName,
+  importCoursePayload,
+  parseCoursePayload,
+} from '@/lib/course-bundle';
+import { saveJsonFile } from '@/lib/save-file';
 import type { Material } from '@/lib/types';
 
 type DialogState =
@@ -41,6 +51,7 @@ type DialogState =
   | { kind: 'rename'; target: Material }
   | { kind: 'move'; target: Material }
   | { kind: 'delete'; target: Material }
+  | { kind: 'export'; target: Material }
   | null;
 
 export default function MapsPanel() {
@@ -52,6 +63,8 @@ export default function MapsPanel() {
 
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<DialogState>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importBusy, setImportBusy] = useState(false);
 
   const roots = useMemo(() => childrenOf(materials, null), [materials]);
 
@@ -76,6 +89,24 @@ export default function MapsPanel() {
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
       if (alive.length > 0) await setActiveMaterialId(alive[0].id);
       else await unsetActiveMaterial();
+    }
+  };
+
+  /** Импорт файла курса (экспорт с вкладки «Карты»): копия с новыми id */
+  const handleCourseFile = async (f: File) => {
+    if (importBusy) return;
+    setImportBusy(true);
+    try {
+      const payload = parseCoursePayload(await f.text());
+      const r = await importCoursePayload(payload);
+      toast.success(`Курс «${r.title}» добавлен`, {
+        description: `Карт: ${r.materials}, идей: ${r.nodes}, задач: ${r.tasks}. Прогресс начнётся с нуля.`,
+      });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось импортировать курс');
+    } finally {
+      setImportBusy(false);
+      if (fileRef.current) fileRef.current.value = '';
     }
   };
 
@@ -142,6 +173,13 @@ export default function MapsPanel() {
               <ArrowRightLeft className="h-3.5 w-3.5" />
             </button>
             <button
+              onClick={() => setDialog({ kind: 'export', target: m })}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="Экспорт курса (без прогресса)"
+            >
+              <FileDown className="h-3.5 w-3.5" />
+            </button>
+            <button
               onClick={() => setDialog({ kind: 'delete', target: m })}
               className="flex h-6 w-6 items-center justify-center rounded text-rose-400/80 hover:bg-rose-500/10 hover:text-rose-400"
               title="Удалить"
@@ -164,10 +202,33 @@ export default function MapsPanel() {
             Карта — контейнер связанных идей. Внутри карты могут лежать другие карты: входи в них прямо с графа.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="shrink-0" onClick={() => setDialog({ kind: 'createRoot' })}>
-          <Plus className="mr-1 h-4 w-4" /> Новая
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => fileRef.current?.click()}
+            disabled={importBusy}
+          >
+            <FileUp className="mr-1 h-4 w-4" /> Импорт курса
+          </Button>
+          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setDialog({ kind: 'createRoot' })}>
+            <Plus className="mr-1 h-4 w-4" /> Новая
+          </Button>
+        </div>
       </header>
+
+      {/* файл курса импортируется копией с новыми id — конфликты с существующими картами невозможны */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void handleCourseFile(f);
+        }}
+      />
 
       <div className="flex flex-col gap-1">
         {!ready ? (
@@ -214,7 +275,7 @@ function MapDialogs({
 }: {
   dialog: NonNullable<DialogState>;
   materials: Material[];
-  stats: Map<string, { subtreeAtoms: number; subtreeMaps: number }>;
+  stats: Map<string, { directAtoms: number; subtreeAtoms: number; subtreeMaps: number }>;
   onClose: () => void;
   afterDelete: (deletedIds: string[]) => Promise<void>;
 }) {
@@ -223,6 +284,7 @@ function MapDialogs({
     dialog.kind === 'move' ? (dialog.target.parentId ?? null) : null
   );
   const [busy, setBusy] = useState(false);
+  const [includeChildren, setIncludeChildren] = useState(true); // для диалога экспорта
 
   const titleOf = (m: Material) => m.title;
   const depthById = useMemo(() => {
@@ -265,6 +327,26 @@ function MapDialogs({
       onClose();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось переместить');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleExport = async (target: Material, withChildren: boolean) => {
+    setBusy(true);
+    try {
+      const payload = await buildCourseBundle(target.id, withChildren);
+      const json = JSON.stringify(payload, null, 2);
+      const fname = courseFileName(target.title);
+      const res = await saveJsonFile(json, fname, 'Отправить курс…');
+      if (res === 'shared') {
+        toast.success('Файл курса сохранён — отправь его в мессенджере или на другое устройство');
+      } else if (res === 'downloaded') {
+        toast.success(`Файл курса скачан: ${fname}`);
+      }
+      onClose();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось экспортировать курс');
     } finally {
       setBusy(false);
     }
@@ -402,6 +484,63 @@ function MapDialogs({
           <DialogFooter>
             <Button variant="outline" onClick={onClose}>Отмена</Button>
             <Button disabled={busy} onClick={() => void handleMove(dialog.target)}>Переместить</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
+  if (dialog.kind === 'export') {
+    const target = dialog.target;
+    const st = stats.get(target.id);
+    const subtreeMaps = st?.subtreeMaps ?? 0;
+    const hasKids = subtreeMaps > 0;
+    const atoms = hasKids && includeChildren ? (st?.subtreeAtoms ?? 0) : (st?.directAtoms ?? 0);
+    // «1 вложенную карту» / «2 вложенные карты» / «5 вложенных карт»
+    const m10 = subtreeMaps % 10;
+    const m100 = subtreeMaps % 100;
+    const mapsWord =
+      m10 === 1 && m100 !== 11
+        ? 'вложенную карту'
+        : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)
+          ? 'вложенные карты'
+          : 'вложенных карт';
+    return (
+      <Dialog open onOpenChange={(v) => !v && onClose()}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Экспорт курса «{target.title}»</DialogTitle>
+            <DialogDescription>
+              В файл войдут {hasKids && includeChildren ? `карта и ${subtreeMaps} ${mapsWord}, всего идей: ${atoms}` : `идеи карты: ${atoms}`} с задачами и связями.
+              Прогресс не переносится: на новом устройстве курс начнётся с нуля.
+            </DialogDescription>
+          </DialogHeader>
+          {hasKids && (
+            <button
+              onClick={() => setIncludeChildren((v) => !v)}
+              className="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5 text-left text-sm"
+              aria-pressed={includeChildren}
+            >
+              <span
+                className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors ${
+                  includeChildren ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40'
+                }`}
+              >
+                {includeChildren && <Check className="h-4 w-4" />}
+              </span>
+              <span>
+                Включить {subtreeMaps === 1 ? 'вложенную карту' : 'вложенные карты'} ({subtreeMaps})
+                <span className="block text-xs text-muted-foreground">
+                  Без галочки экспортируется только сама карта ({st?.directAtoms ?? 0} идей)
+                </span>
+              </span>
+            </button>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={onClose}>Отмена</Button>
+            <Button disabled={busy} onClick={() => void handleExport(target, includeChildren)}>
+              <FileDown className="mr-1 h-4 w-4" /> Экспортировать
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

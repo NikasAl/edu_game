@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 import type {
   Attempt,
+  CoursePayload,
   IdeaEdge,
   IdeaNode,
   LLMProvider,
@@ -139,7 +140,7 @@ const DATE_KEYS: Record<string, string[]> = {
  * а код приложения вызывает .getTime() и арифметику дат — без ревива
  * после импорта бэкапа крашится рендер карты/узла.
  */
-function reviveRows<T>(rows: unknown, table: string): T[] {
+export function reviveRows<T>(rows: unknown, table: string): T[] {
   if (!Array.isArray(rows)) return [];
   const keys = DATE_KEYS[table] ?? [];
   return rows.map((row) => {
@@ -157,7 +158,7 @@ function reviveRows<T>(rows: unknown, table: string): T[] {
 }
 
 /** bulkPut порциями, с уступкой событийного цикла — крупный бэкап не блокирует UI надолго */
-async function chunkedPut(table: Table, rows: unknown[]): Promise<void> {
+export async function chunkedPut(table: Table, rows: unknown[]): Promise<void> {
   const CHUNK = 200;
   for (let i = 0; i < rows.length; i += CHUNK) {
     await table.bulkPut(rows.slice(i, i + CHUNK) as never[]);
@@ -170,6 +171,17 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
     const data = JSON.parse(json) as Record<string, unknown>;
     if (data?.app !== 'edu_game' || !Array.isArray(data.nodes)) {
       return { ok: false, message: 'Неверный формат файла: ожидается бэкап edu_game' };
+    }
+
+    // Это файл курса (экспорт с вкладки «Карты»), а не полный бэкап —
+    // импортируем как курс: копия с новыми id, без прогресса
+    if (data.kind === 'course') {
+      const { importCoursePayload } = await import('./course-bundle');
+      const r = await importCoursePayload(data as unknown as CoursePayload);
+      return {
+        ok: true,
+        message: `Курс «${r.title}» добавлен: карт: ${r.materials}, идей: ${r.nodes}, задач: ${r.tasks}`,
+      };
     }
 
     // Нормализация под дерево карт (бэкапы версии 1 не содержат parentId)

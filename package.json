@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "gen:preinstall": "node tools/preinstall/gen-index.mjs",
     "build:android": "npm run build && npx cap sync android",
     "apk:debug": "npm run build:android && cd android && ./gradlew assembleDebug",
     "apk:release": "npm run build:android && cd android && ./gradlew assembleRelease",

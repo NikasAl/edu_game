@@ -11,6 +11,7 @@ import ImportPanel from '@/components/app/ImportPanel';
 import SettingsPanel from '@/components/app/SettingsPanel';
 import NodeView from '@/components/app/NodeView';
 import NodeEditor from '@/components/app/NodeEditor';
+import { importPreinstalledCourses } from '@/lib/preinstall';
 
 export default function Home() {
   const hydrated = useAppStore((s) => s.hydrated);
@@ -20,7 +21,7 @@ export default function Home() {
   const editNodeId = useAppStore((s) => s.editNodeId);
 
   useEffect(() => {
-    void init();
+    void init().then(() => importPreinstalledCourses());
   }, [init]);
 
   if (!hydrated) {

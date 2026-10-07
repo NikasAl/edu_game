@@ -33,6 +33,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { exportAll, importAll, resetMaterialProgress, getMeta, setMeta } from '@/lib/db';
 import { isNativePlatform } from '@/lib/nativeHttp';
+import { saveJsonFile } from '@/lib/save-file';
 import {
   llmDebugClear,
   llmDebugSnapshot,
@@ -169,42 +170,17 @@ export default function SettingsPanel() {
     }
   };
 
-  const downloadBackup = (json: string, fname: string) => {
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fname;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success('Бэкап скачан');
-  };
-
   const doExport = async () => {
     const json = await exportAll();
     const fname = `edu-game-backup-${new Date().toISOString().split('T')[0]}.json`;
-    if (isNative) {
-      try {
-        // на Android — системное меню «Поделиться»: файл можно отправить
-        // в мессенджер/почту и передать на другое устройство
-        const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
-        const { Share } = await import('@capacitor/share');
-        const res = await Filesystem.writeFile({
-          path: fname,
-          data: json,
-          directory: Directory.Cache,
-          encoding: Encoding.UTF8,
-        });
-        await Share.share({ title: fname, files: [res.uri], dialogTitle: 'Отправить бэкап…' });
-        toast.success('Бэкап сохранён во временный файл — отправь его себе в мессенджере');
-        return;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/cancel|отмен/i.test(msg)) return;
-        toast.error(`Не удалось открыть меню «Поделиться» (${msg}) — скачиваю файл`);
-      }
+    const res = await saveJsonFile(json, fname, 'Отправить бэкап…');
+    if (res === 'shared') {
+      toast.success('Бэкап сохранён во временный файл — отправь его себе в мессенджере');
+    } else if (res === 'downloaded') {
+      // в браузере это обычное скачивание, на Android — фолбэк после сбоя «Поделиться»
+      if (isNative) toast.error('Не удалось открыть меню «Поделиться» — бэкап скачан файлом');
+      else toast.success('Бэкап скачан');
     }
-    downloadBackup(json, fname);
   };
 
   const runImport = async (json: string, onDone?: () => void) => {
