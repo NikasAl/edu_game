@@ -4,7 +4,8 @@
  * Страница «Карты» (вкладка в нижней навигации): дерево карт с операциями —
  * войти, создать (корневую/подраздел), переименовать, переместить, удалить.
  * Карта — контейнер связанных идей; дерево задаётся Material.parentId.
- * Операции по карте открываются компактными диалогами поверх страницы.
+ * Операции по карте собраны в меню «⋯» у строки (на узком экране телефона
+ * ряд отдельных кнопок съедает место у названия), открываются диалогами поверх страницы.
  */
 import { useMemo, useRef, useState } from 'react';
 import {
@@ -16,6 +17,7 @@ import {
   FileDown,
   FileUp,
   Map as MapIcon,
+  MoreVertical,
   Pencil,
   Plus,
   Trash2,
@@ -23,6 +25,13 @@ import {
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   Dialog,
   DialogContent,
@@ -150,43 +159,12 @@ export default function MapsPanel() {
               открыта
             </Badge>
           )}
-          <div className="flex shrink-0 items-center gap-0.5 opacity-80">
-            <button
-              onClick={() => setDialog({ kind: 'createSub', parent: m })}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Добавить подраздел"
-            >
-              <CornerDownRight className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={() => setDialog({ kind: 'rename', target: m })}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Переименовать"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={() => setDialog({ kind: 'move', target: m })}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Переместить"
-            >
-              <ArrowRightLeft className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={() => setDialog({ kind: 'export', target: m })}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Экспорт курса (без прогресса)"
-            >
-              <FileDown className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={() => setDialog({ kind: 'delete', target: m })}
-              className="flex h-6 w-6 items-center justify-center rounded text-rose-400/80 hover:bg-rose-500/10 hover:text-rose-400"
-              title="Удалить"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-          </div>
+          <MapRowMenu
+            onAction={(kind) => {
+              if (kind === 'createSub') setDialog({ kind: 'createSub', parent: m });
+              else setDialog({ kind, target: m });
+            }}
+          />
         </div>
         {kids.length > 0 && isOpen && <div>{kids.map((c) => renderRow(c, depth + 1))}</div>}
       </div>
@@ -195,27 +173,38 @@ export default function MapsPanel() {
 
   return (
     <div className="flex flex-col gap-4">
-      <header className="flex items-start justify-between gap-2">
-        <div>
+      {/* Компактная шапка: заголовок и иконки на одной строке, пояснение —
+          во всю ширину, а не в узкой колонке между кнопками (проблема телефонов) */}
+      <header className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-2">
           <h1 className="text-lg font-semibold">Мои карты</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Карта — контейнер связанных идей. Внутри карты могут лежать другие карты: входи в них прямо с графа.
-          </p>
+          <div className="flex shrink-0 gap-1.5">
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-9 w-9"
+              onClick={() => fileRef.current?.click()}
+              disabled={importBusy}
+              title="Импорт курса из файла"
+              aria-label="Импорт курса из файла"
+            >
+              <FileUp className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-9 w-9"
+              onClick={() => setDialog({ kind: 'createRoot' })}
+              title="Новая карта"
+              aria-label="Новая карта"
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
-        <div className="flex shrink-0 gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="shrink-0"
-            onClick={() => fileRef.current?.click()}
-            disabled={importBusy}
-          >
-            <FileUp className="mr-1 h-4 w-4" /> Импорт курса
-          </Button>
-          <Button variant="outline" size="sm" className="shrink-0" onClick={() => setDialog({ kind: 'createRoot' })}>
-            <Plus className="mr-1 h-4 w-4" /> Новая
-          </Button>
-        </div>
+        <p className="text-[13px] leading-snug text-muted-foreground">
+          Карта — контейнер связанных идей. Внутри могут лежать другие карты — входи в них прямо с графа.
+        </p>
       </header>
 
       {/* файл курса импортируется копией с новыми id — конфликты с существующими картами невозможны */}
@@ -262,6 +251,44 @@ export default function MapsPanel() {
         />
       )}
     </div>
+  );
+}
+
+/** Меню «⋯» с операциями над картой — заменяет ряд кнопок, съедавший название на телефоне */
+function MapRowMenu({ onAction }: { onAction: (kind: 'createSub' | 'rename' | 'move' | 'export' | 'delete') => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          title="Действия с картой"
+          aria-label="Действия с картой"
+        >
+          <MoreVertical className="h-4 w-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-52">
+        <DropdownMenuItem onClick={() => onAction('createSub')}>
+          <CornerDownRight /> Добавить подраздел
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onAction('rename')}>
+          <Pencil /> Переименовать
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onAction('move')}>
+          <ArrowRightLeft /> Переместить
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onAction('export')}>
+          <FileDown /> Экспорт курса
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => onAction('delete')}
+          className="text-rose-400 focus:bg-rose-500/10 focus:text-rose-400"
+        >
+          <Trash2 className="!text-rose-400" /> Удалить
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

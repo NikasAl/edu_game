@@ -62,6 +62,7 @@ import { enrichGraph } from '@/lib/graph-db';
 import type { EdgeKind, IdeaEdge, IdeaNode, LLMProvider, Material, Region, Task } from '@/lib/types';
 import { normalizeAtomKind } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
+import AutoAdvanceBanner from './AutoAdvanceBanner';
 
 type Phase = 'input' | 'extract' | 'pdfOcr' | 'parsing' | 'review' | 'tasks';
 type SourceMode = 'paste' | 'url' | 'pdf' | 'djvu';
@@ -218,27 +219,39 @@ export default function ImportPanel() {
   const [parentChoice, setParentChoice] = useState<string | null>(null);
   const effectiveParent = parentChoice ?? (activeMaterialId && materials?.some((m) => m.id === activeMaterialId) ? activeMaterialId : 'root');
 
-  const startParse = async () => {
+  const parseBusyRef = useRef(false); // защита от двойного запуска (кнопка + автопереход)
+  const saveBusyRef = useRef(false); // защита от двойного сохранения (кнопка + автопереход)
+
+  /**
+   * Разбор текста на атомы. titleArg/textArg — явная подмена значений из стора:
+   * автопереход из фазы «выбор разделов» применяет разделы и сразу запускает разбор
+   * одним вызовом — в замыкании на этот момент ещё старый текст стора.
+   */
+  const runParse = async (titleArg?: string, textArg?: string) => {
+    if (parseBusyRef.current) return;
     if (!activeProvider) {
       toast.error('Сначала подключи LLM-провайдера во вкладке «Настройки»');
       return;
     }
-    if (ingestTitle.trim().length < 3) {
+    const title = (titleArg ?? ingestTitle).trim();
+    const text = (textArg ?? ingestSourceText).trim();
+    if (title.length < 3) {
       toast.error('Укажи название материала');
       return;
     }
-    if (ingestSourceText.trim().length < 500) {
+    if (text.length < 500) {
       toast.error('Текст слишком короткий: нужно хотя бы ~500 знаков содержательной части');
       return;
     }
+    parseBusyRef.current = true;
     setPhase('parsing');
     setProgressMsg('Разбираю текст на атомы идей…');
     setProgressVal(10);
     try {
       const result = await ingestSplitIntoIdeasChunked(
         activeProvider,
-        ingestTitle.trim(),
-        ingestSourceText.trim(),
+        title,
+        text,
         detail,
         (done, total) => {
           setProgressMsg(
@@ -258,8 +271,12 @@ export default function ImportPanel() {
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось разобрать материал');
       setPhase('input');
+    } finally {
+      parseBusyRef.current = false;
     }
   };
+
+  const startParse = () => void runParse();
 
   // ============ Извлечение из URL / PDF ============
 
@@ -526,8 +543,41 @@ export default function ImportPanel() {
     );
   };
 
+  /**
+   * Автопереход из фазы выбора разделов (после OCR/URL/PDF): применяем выбранные
+   * разделы и сразу запускаем разбор на атомы — без промежуточной остановки на
+   * фазе ввода. Возврат false останавливает отсчёт баннера: пользователь правит
+   * вручную (например, не хватает отмеченного текста или не задано название).
+   */
+  const autoContinueExtract = (): boolean => {
+    if (!activeProvider) {
+      toast.error('Нужен LLM-провайдер — подключи его в «Настройках», и автопереход заработает');
+      return false;
+    }
+    const title = extractTitle.trim() || ingestTitle.trim();
+    if (title.trim().length < 3) {
+      toast.error('Укажи название материала (минимум 3 символа) — тогда импорт продолжится сам');
+      return false;
+    }
+    if (selectedSections.length === 0) {
+      toast.error('Не отмечен ни один раздел — отметь хотя бы один');
+      return false;
+    }
+    const text = selectedSections.map((s) => s.text.trim()).join('\n\n');
+    if (text.trim().length < 500) {
+      toast.error('Выбрано слишком мало текста (нужно ~500 знаков) — отметь ещё разделы');
+      return false;
+    }
+    setIngestDraft(title, text);
+    setSourceMode('paste');
+    toast.info(`Разделы применены (${selectedSections.length}) — разбираю на атомы`);
+    void runParse(title, text);
+    return true;
+  };
+
   const saveMaterial = async () => {
-    if (!ingestResult) return;
+    if (!ingestResult || saveBusyRef.current) return;
+    saveBusyRef.current = true;
     setPhase('tasks');
     const materialId = uuid();
     const now = new Date();
@@ -645,6 +695,8 @@ export default function ImportPanel() {
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Ошибка сохранения');
       setPhase('review');
+    } finally {
+      saveBusyRef.current = false;
     }
   };
 
@@ -892,6 +944,8 @@ export default function ImportPanel() {
       {phase === 'extract' && (
         <Card>
           <CardContent className="flex flex-col gap-3 p-4">
+            {/* Автопереход к разбору, если правки не нужны — отменяется любым касанием/прокруткой */}
+            <AutoAdvanceBanner nextLabel="разбору на атомы" onAdvance={autoContinueExtract} />
             <div>
               <p className="text-xs text-muted-foreground">Источник: {extractSource}</p>
               <label className="mb-1.5 mt-2 block text-xs font-medium text-muted-foreground">
@@ -1327,6 +1381,14 @@ function ReviewList({ onBack, onSave }: { onBack: () => void; onSave: () => void
 
   return (
     <div className="flex flex-col gap-3">
+      {/* Автопереход к сохранению и генерации задач, если правки не нужны */}
+      <AutoAdvanceBanner
+        nextLabel="сохранению и генерации задач"
+        onAdvance={() => {
+          onSave();
+          return true;
+        }}
+      />
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium">
           Ревью: {ingestResult.atoms.length} атомов, {ingestResult.regions.length} регионов
