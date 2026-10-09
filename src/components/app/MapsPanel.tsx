@@ -257,7 +257,11 @@ export default function MapsPanel() {
 /** Меню «⋯» с операциями над картой — заменяет ряд кнопок, съедавший название на телефоне */
 function MapRowMenu({ onAction }: { onAction: (kind: 'createSub' | 'rename' | 'move' | 'export' | 'delete') => void }) {
   return (
-    <DropdownMenu>
+    // modal=false: меню не ставит body pointer-events:none. Модальное меню в связке
+    // «пункт → диалог» оставляло body заблокированным навсегда (диалог маунтился,
+    // пока меню закрывалось, захватывал none как «исходное» и возвращал его при
+    // закрытии) — приложение переставало отвечать на любые клики, включая навигацию.
+    <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <button
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
