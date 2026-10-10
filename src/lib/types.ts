@@ -224,6 +224,12 @@ export interface Attempt {
   score?: number; // 0..1, суммарная оценка
   feedback?: string; // текст обратной связи (LLM/оценщик)
   details?: string; // рубрика, заблуждения и т.п.
+  /**
+   * Пробная попытка после уже полученного зачёта (переответ ради нового
+   * разбора другой формулировки): в историю и статистику попадает,
+   * но состояние узла не меняет — зачёт не снимает и не даёт нового.
+   */
+  exploratory?: boolean;
   createdAt: Date;
 }
 
@@ -264,6 +270,20 @@ export interface NodeDraft {
   taskChoices: Record<string, number>; // taskId → выбранный индекс варианта
   ownTaskText: string;
   updatedAt: Date;
+}
+
+// ============ Обсуждение идеи с ИИ ============
+
+export type ChatRole = 'user' | 'assistant';
+
+/** Сообщение обсуждения идеи (хранится по узлу, история переписки) */
+export interface ChatMessage {
+  id: string;
+  nodeId: string;
+  materialId: string;
+  role: ChatRole;
+  content: string;
+  createdAt: Date;
 }
 
 // ============ LLM-операции ============
@@ -341,6 +361,8 @@ export interface BackupPayload {
   progress: NodeProgressRec[];
   providers: LLMProvider[];
   drafts?: NodeDraft[];
+  /** обсуждения идей (v4) — опционально: старые бэкапы их не содержат */
+  chatMessages?: ChatMessage[];
 }
 
 /**

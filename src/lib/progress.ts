@@ -45,6 +45,16 @@ export function isOwnRequired(mode: DifficultyMode): boolean {
   return mode === 'full';
 }
 
+/**
+ * Учитывается ли попытка в правилах зачёта?
+ * exploratory — «пробная» попытка, сделанная после уже полученного зачёта
+ * (переответ ради нового разбора): она попадает в историю и статистику,
+ * но состояние узла не меняет — провал после зачёта освоенность НЕ снимает.
+ */
+export function countsForState(a: Attempt): boolean {
+  return !a.exploratory;
+}
+
 /** Матрица смежности: deps[nodeId] = [{ id, kind }] — от чего зависит узел */
 function buildDeps(edges: IdeaEdge[]): Map<string, { id: string; kind: 'hard' | 'soft' }[]> {
   const deps = new Map<string, { id: string; kind: 'hard' | 'soft' }[]>();
@@ -75,10 +85,12 @@ export function computeNodeStates(input: ComputeInput): Map<string, NodeState> {
   const difficulty = input.difficulty ?? 'full';
   const deps = buildDeps(edges);
 
-  // Последняя попытка по ключу (nodeId, kind, taskId)
+  // Последняя попытка по ключу (nodeId, kind, taskId) — пробные (exploratory)
+  // попытки не участвуют: последняя «настоящая» попытка определяет зачёт
   const latest = new Map<string, Attempt>();
   const sorted = [...attempts].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   for (const a of sorted) {
+    if (!countsForState(a)) continue;
     const key = `${a.nodeId}|${a.kind}|${a.taskId ?? ''}`;
     latest.set(key, a);
   }

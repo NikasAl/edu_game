@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 import type {
   Attempt,
+  ChatMessage,
   CoursePayload,
   IdeaEdge,
   IdeaNode,
@@ -24,6 +25,7 @@ export class EduGameDexie extends Dexie {
   attempts!: Table<Attempt, string>;
   progress!: Table<NodeProgressRec, string>;
   drafts!: Table<NodeDraft, string>;
+  chatMessages!: Table<ChatMessage, string>;
   meta!: Table<MetaRec, string>;
 
   constructor() {
@@ -54,6 +56,10 @@ export class EduGameDexie extends Dexie {
     // v3: черновики ответов пользователя (сохраняются даже неверные)
     this.version(3).stores({
       drafts: 'nodeId, materialId, updatedAt',
+    });
+    // v4: обсуждения идей с ИИ (история переписки по узлу)
+    this.version(4).stores({
+      chatMessages: 'id, nodeId, materialId, createdAt',
     });
   }
 }
@@ -109,7 +115,7 @@ export async function seedDemoIfFirstRun(): Promise<boolean> {
 export async function exportAll(): Promise<string> {
   const payload = {
     app: 'edu_game',
-    version: 3,
+    version: 4,
     exportedAt: new Date().toISOString(),
     materials: await db.materials.toArray(),
     regions: await db.regions.toArray(),
@@ -119,6 +125,7 @@ export async function exportAll(): Promise<string> {
     attempts: await db.attempts.toArray(),
     progress: await db.progress.toArray(),
     drafts: await db.drafts.toArray(),
+    chatMessages: await db.chatMessages.toArray(),
     providers: await db.providers.toArray(),
   };
   return JSON.stringify(payload, null, 2);
@@ -132,6 +139,7 @@ const DATE_KEYS: Record<string, string[]> = {
   attempts: ['createdAt'],
   progress: ['updatedAt', 'masteredAt', 'srsDue'],
   drafts: ['updatedAt'],
+  chatMessages: ['createdAt'],
   providers: ['createdAt', 'updatedAt'],
 };
 
@@ -205,6 +213,14 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
       ownTaskText: d.ownTaskText ?? '',
       updatedAt: d.updatedAt ?? new Date(),
     }));
+    const chatMessages = reviveRows<ChatMessage>(data.chatMessages, 'chatMessages').map((m) => ({
+      id: m.id,
+      nodeId: m.nodeId,
+      materialId: m.materialId ?? '',
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content ?? '',
+      createdAt: m.createdAt ?? new Date(),
+    }));
     const providers = reviveRows<LLMProvider>(data.providers, 'providers');
 
     // Порционная запись без общей транзакции: уступаем UI между порциями
@@ -217,6 +233,7 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
     if (attempts.length) await chunkedPut(db.attempts, attempts);
     if (progress.length) await chunkedPut(db.progress, progress);
     if (drafts.length) await chunkedPut(db.drafts, drafts);
+    if (chatMessages.length) await chunkedPut(db.chatMessages, chatMessages);
     if (providers.length) await chunkedPut(db.providers, providers);
 
     const counts = `карт: ${materials.length}, узлов: ${nodes.length}, задач: ${tasks.length}, попыток: ${attempts.length}`;
@@ -244,9 +261,9 @@ export async function deleteMapCascade(rootId: string): Promise<number> {
   const ids = collectSubtreeIds(all, rootId);
   await db.transaction(
     'rw',
-    // drafts обязана входить в область транзакции — иначе обращения к ней внутри
-    // падают с «The specified object store was not found» и карта не удаляется
-    [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress, db.drafts],
+    // drafts/chatMessages обязаны входить в область транзакции — иначе обращения
+    // к ним внутри падают с «The specified object store was not found» и карта не удаляется
+    [db.materials, db.regions, db.nodes, db.edges, db.tasks, db.attempts, db.progress, db.drafts, db.chatMessages],
     async () => {
       await db.materials.bulkDelete(ids);
       for (const mid of ids) {
@@ -257,6 +274,7 @@ export async function deleteMapCascade(rootId: string): Promise<number> {
         await db.attempts.where('materialId').equals(mid).delete();
         await db.progress.where('materialId').equals(mid).delete();
         await db.drafts.where('materialId').equals(mid).delete();
+        await db.chatMessages.where('materialId').equals(mid).delete();
       }
     }
   );
@@ -318,6 +336,11 @@ export async function resetNodeProgress(nodeId: string): Promise<void> {
     await db.attempts.where('nodeId').equals(nodeId).delete();
     await db.drafts.delete(nodeId);
   });
+}
+
+/** Очистить обсуждение идеи (история чата узла) */
+export async function clearNodeChat(nodeId: string): Promise<void> {
+  await db.chatMessages.where('nodeId').equals(nodeId).delete();
 }
 
 /** id карты + id всех её потомков (защита от циклов включена) */

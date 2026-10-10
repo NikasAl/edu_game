@@ -9,8 +9,14 @@
  * освоенность. Дата освоения узла = дата последнего из этих зачётных
  * «последних попыток» (момент, когда закрылась последняя дырка).
  */
-import type { Attempt, IdeaEdge, IdeaNode, Region, Task } from './types';
-import { computeNodeStates, isOwnRequired, isTaskRequired, type DifficultyMode } from './progress';
+import type { Attempt, IdeaEdge, IdeaNode, NodeState, Region, Task } from './types';
+import {
+  computeNodeStates,
+  countsForState,
+  isOwnRequired,
+  isTaskRequired,
+  type DifficultyMode,
+} from './progress';
 
 export interface DayActivity {
   dayKey: string; // YYYY-MM-DD (локальная зона)
@@ -47,6 +53,152 @@ export interface StatsBundle {
   tasks: Task[];
   attempts: Attempt[];
   regions?: Region[]; // если заданы — заполняется regionProgress
+}
+
+// ============ Периоды («за сегодня», «за неделю», «за всё время») ============
+
+export type StatsPeriod = 'today' | 'week' | 'all';
+
+export const STATS_PERIOD_META: Record<StatsPeriod, { label: string }> = {
+  today: { label: 'Сегодня' },
+  week: { label: 'Неделя' },
+  all: { label: 'Всё время' },
+};
+
+/** Начало периода (включительно) или null для «Всё время» */
+export function periodStart(period: StatsPeriod, now: Date): Date | null {
+  if (period === 'all') return null;
+  const today = startOfDay(now);
+  // «Неделя» = 7 календарных дней, включая сегодня
+  return period === 'today' ? today : addDays(today, -6);
+}
+
+export interface PeriodSummary {
+  attempts: number;
+  passes: number;
+  fails: number;
+  accuracy: number; // pass / (pass+fail); 0 если попыток нет
+  trials: { feynman: TrialStats; task: TrialStats; own: TrialStats };
+  /** узлов, ФИНАЛЬНО освоившихся в период (дата освоения внутри периода) */
+  masteredNodes: number;
+}
+
+/**
+ * Сводка активности за период («Сегодня»/«Неделя»/«Всё время»).
+ * Состояния узлов кумулятивны по природе, поэтому здесь только то, что
+ * честно измеряется попытками: попытки/зачёты/точность, разбивка по
+ * испытаниям и узлы, доведённые до зачёта в этот период.
+ */
+export function computePeriodSummary(input: {
+  nodes: IdeaNode[];
+  tasks: Task[];
+  attempts: Attempt[];
+  difficulty?: DifficultyMode;
+  period: StatsPeriod;
+  now?: Date;
+}): PeriodSummary {
+  const difficulty = input.difficulty ?? 'full';
+  const now = input.now ?? new Date();
+  const from = periodStart(input.period, now);
+  const scoped = from ? input.attempts.filter((a) => a.createdAt >= from) : input.attempts;
+
+  let passes = 0;
+  let fails = 0;
+  const trials: { feynman: TrialStats; task: TrialStats; own: TrialStats } = {
+    feynman: { attempts: 0, passes: 0 },
+    task: { attempts: 0, passes: 0 },
+    own: { attempts: 0, passes: 0 },
+  };
+  for (const a of scoped) {
+    if (a.verdict === 'pass') passes++;
+    else if (a.verdict === 'fail') fails++;
+    // 'review' — SRS-повторение, в разбивку испытаний не входит
+    const tr = a.kind === 'review' ? undefined : trials[a.kind];
+    if (tr) {
+      tr.attempts++;
+      if (a.verdict === 'pass') tr.passes++;
+    }
+  }
+
+  // Узлы, освоившиеся именно в период: те же правила даты освоения, что в computeStats
+  let masteredNodes = 0;
+  const states = computeNodeStates({
+    nodes: input.nodes,
+    edges: [],
+    tasks: input.tasks,
+    attempts: input.attempts,
+    difficulty,
+  });
+  const latest = latestAttemptsMap(input.attempts);
+  const dates = masteredDatesFrom(input.nodes, tasksByNodeMap(input.tasks), latest, states, difficulty);
+  for (const n of input.nodes) {
+    if (states.get(n.id)?.status !== 'mastered') continue;
+    const d = dates.get(n.id);
+    if (from ? d !== undefined && d >= from : d !== undefined) masteredNodes++;
+  }
+
+  return {
+    attempts: scoped.length,
+    passes,
+    fails,
+    accuracy: passes + fails > 0 ? passes / (passes + fails) : 0,
+    trials,
+    masteredNodes,
+  };
+}
+
+/** Последняя попытка по ключу (nodeId, kind, taskId); пробные (exploratory) не учитываются */
+function latestAttemptsMap(attempts: Attempt[]): Map<string, Attempt> {
+  const latest = new Map<string, Attempt>();
+  const sorted = [...attempts].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  for (const a of sorted) {
+    if (!countsForState(a)) continue;
+    latest.set(`${a.nodeId}|${a.kind}|${a.taskId ?? ''}`, a);
+  }
+  return latest;
+}
+
+/** Группировка задач по узлам */
+function tasksByNodeMap(tasks: Task[]): Map<string, Task[]> {
+  const map = new Map<string, Task[]>();
+  for (const t of tasks) {
+    const list = map.get(t.nodeId) ?? [];
+    list.push(t);
+    map.set(t.nodeId, list);
+  }
+  return map;
+}
+
+/**
+ * Дата финального освоения освоенных узлов: последний из зачётных
+ * «последних попыток» (момент, когда закрылась последняя дырка).
+ * Обязательные испытания — с учётом режима сложности; добровольно
+ * пройденные («своя задача»/эссе в Лёгком) дату не отодвигают.
+ */
+function masteredDatesFrom(
+  nodes: IdeaNode[],
+  tasksByNode: Map<string, Task[]>,
+  latest: Map<string, Attempt>,
+  states: Map<string, NodeState>,
+  difficulty: DifficultyMode
+): Map<string, Date> {
+  const masteredAt = new Map<string, Date>();
+  for (const n of nodes) {
+    const nodeTasks = tasksByNode.get(n.id) ?? [];
+    if (nodeTasks.length === 0) continue; // без задач освоить нельзя
+    if (states.get(n.id)?.status !== 'mastered') continue;
+    const dates: Date[] = [];
+    const fey = latest.get(`${n.id}|feynman|`);
+    const own = latest.get(`${n.id}|own|`);
+    if (fey?.verdict === 'pass') dates.push(fey.createdAt);
+    if (isOwnRequired(difficulty) && own?.verdict === 'pass') dates.push(own.createdAt);
+    for (const t of nodeTasks.filter((t) => isTaskRequired(t, difficulty))) {
+      const a = latest.get(`${n.id}|task|${t.id}`);
+      if (a?.verdict === 'pass') dates.push(a.createdAt);
+    }
+    if (dates.length > 0) masteredAt.set(n.id, dates.reduce((m, d) => (d > m ? d : m)));
+  }
+  return masteredAt;
 }
 
 export interface StatsResult {
@@ -98,40 +250,17 @@ export function computeStats(
   // --- состояния узлов (статусы и освоенность) — те же правила, что в UI ---
   const states = computeNodeStates({ nodes, edges, tasks, attempts, difficulty });
 
-  // --- последняя попытка по испытанию (nodeId, kind, taskId) ---
-  const latest = new Map<string, Attempt>();
-  const sorted = [...attempts].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-  for (const a of sorted) {
-    latest.set(`${a.nodeId}|${a.kind}|${a.taskId ?? ''}`, a);
-  }
+  // --- последняя попытка по испытанию (nodeId, kind, taskId); пробные не учитываются ---
+  const latest = latestAttemptsMap(attempts);
 
-  const tasksByNode = new Map<string, Task[]>();
-  for (const t of tasks) {
-    const list = tasksByNode.get(t.nodeId) ?? [];
-    list.push(t);
-    tasksByNode.set(t.nodeId, list);
-  }
+  const tasksByNode = tasksByNodeMap(tasks);
 
   // --- дата финального освоения каждого освоенного узла ---
-  const masteredAt = new Map<string, Date>();
+  const masteredAt = masteredDatesFrom(nodes, tasksByNode, latest, states, difficulty);
   let nodesMasterable = 0;
   for (const n of nodes) {
-    const nodeTasks = tasksByNode.get(n.id) ?? [];
-    if (nodeTasks.length === 0) continue; // без задач освоить нельзя
+    if ((tasksByNode.get(n.id) ?? []).length === 0) continue; // без задач освоить нельзя
     nodesMasterable++;
-    if (states.get(n.id)?.status !== 'mastered') continue;
-    const dates: Date[] = [];
-    const fey = latest.get(`${n.id}|feynman|`);
-    const own = latest.get(`${n.id}|own|`);
-    if (fey?.verdict === 'pass') dates.push(fey.createdAt);
-    // в зачёт момента освоения идут только ОБЯЗАТЕЛЬНЫЕ испытания:
-    // добровольно пройденная «своя задача»/эссе не отодвигают дату
-    if (isOwnRequired(difficulty) && own?.verdict === 'pass') dates.push(own.createdAt);
-    for (const t of nodeTasks.filter((t) => isTaskRequired(t, difficulty))) {
-      const a = latest.get(`${n.id}|task|${t.id}`);
-      if (a?.verdict === 'pass') dates.push(a.createdAt);
-    }
-    if (dates.length > 0) masteredAt.set(n.id, dates.reduce((m, d) => (d > m ? d : m)));
   }
 
   // --- счётчики узлов ---

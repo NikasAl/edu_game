@@ -8,9 +8,11 @@ import { callLLM, type LLMMessage } from './llm-client';
 import { extractJson } from './llm-json';
 import type {
   AtomKind,
+  ChatMessage,
   EdgeKind,
   EssayGrade,
   FeynmanGrade,
+  IdeaNode,
   IngestResult,
   LLMProvider,
   OwnTaskVerdict,
@@ -937,6 +939,63 @@ export async function genHint(
     },
   ];
   const res = await callLLM(provider, messages, { temperature: 0.4, maxTokens: 2000, op: 'hint' });
+  return res.content.trim();
+}
+
+// ============ 5.5. Обсуждение идеи с наставником ============
+
+/**
+ * Системный промпт обсуждения идеи: наставник, а не проверяющий.
+ * Задача чата — отвечать на вопросы и развивать мысль, а не оценивать.
+ */
+function chatTutorSystem(node: IdeaNode): string {
+  const parts = [
+    `Ты — терпеливый наставник-собеседник. Ученик изучает идею и хочет её обсудить: что-то навело его на мысли или появились вопросы. Отвечай по-русски, живо и по делу.`,
+    ``,
+    `ИДЕЯ ДЛЯ ОБСУЖДЕНИЯ`,
+    `Название: ${node.title}`,
+    `Суть: ${node.formulation}`,
+    `Пример: ${node.example}`,
+  ];
+  if (node.misconception) parts.push(`Частая ошибка: ${node.misconception}`);
+  if (node.keyTerms.length > 0) parts.push(`Ключевые термины: ${node.keyTerms.join(', ')}`);
+  parts.push(
+    ``,
+    `ПРАВИЛА`,
+    `- Это обсуждение, а не проверка: не выставляй баллы и не вердиктируй — отвечай, объясняй, обсуждай.`,
+    `- Ответы компактные: 2–5 предложений, чтобы читалось с телефона. Расписывай подробнее только если ученик попросит.`,
+    `- Опирайся на идею и её пример; смежные вопросы приветствуются — отвечай и мягко связывай с идеей.`,
+    `- Иногда задавай встречный вопрос или предлагай мини-пример — подталкивай мысль ученика.`,
+    `- Формулы пиши в LaTeX ($...$ строчные, $$...$$ выключные), код — в блоках \`\`\`.`,
+    `- Не выдумывай факты: если чего-то не знаешь — скажи честно.`,
+    `- Не используй markdown-заголовки (#) и таблицы — только абзацы, списки и инлайн-формулы.`
+  );
+  return parts.join('\n');
+}
+
+/** Сколько последних сообщений истории отправляем модели (остальное — только контекст диалога) */
+const CHAT_HISTORY_LIMIT = 24;
+
+/**
+ * Отправить сообщение в обсуждение идеи. Возвращает ответ наставника (обычный текст,
+ * не JSON). История (роль+текст) даёт модели контекст диалога; сам узел — в системе.
+ */
+export async function chatWithTutorLLM(
+  provider: LLMProvider,
+  node: IdeaNode,
+  history: ChatMessage[]
+): Promise<string> {
+  const trimmed = history.slice(-CHAT_HISTORY_LIMIT);
+  const messages: LLMMessage[] = [
+    { role: 'system', content: chatTutorSystem(node) },
+    ...trimmed.map((m) => ({ role: m.role, content: m.content }) as LLMMessage),
+  ];
+  const res = await callLLM(provider, messages, {
+    temperature: 0.6,
+    maxTokens: 2500,
+    op: 'idea_chat',
+    jsonMode: false,
+  });
   return res.content.trim();
 }
 

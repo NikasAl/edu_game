@@ -23,9 +23,10 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { db } from '@/lib/db';
-import { computeStats, type DayActivity } from '@/lib/stats';
+import { computePeriodSummary, computeStats, STATS_PERIOD_META, type DayActivity, type StatsPeriod } from '@/lib/stats';
 import { useAppStore } from '@/store/useAppStore';
 import type { Material } from '@/lib/types';
+import { cn } from '@/lib/utils';
 
 const SCOPES = [14, 28, 60] as const;
 type ScopeDays = (typeof SCOPES)[number];
@@ -33,6 +34,15 @@ type ScopeDays = (typeof SCOPES)[number];
 function loadStoredScope(): string {
   try {
     return localStorage.getItem('edu-stats-scope') || 'all';
+  } catch {
+    return 'all';
+  }
+}
+
+function loadStoredPeriod(): StatsPeriod {
+  try {
+    const v = localStorage.getItem('edu-stats-period');
+    return v === 'today' || v === 'week' || v === 'all' ? v : 'all';
   } catch {
     return 'all';
   }
@@ -56,6 +66,7 @@ export default function StatsPanel() {
   const difficulty = useAppStore((s) => s.difficulty);
   const [scope, setScope] = useState<string>(() => loadStoredScope());
   const [windowDays, setWindowDays] = useState<ScopeDays>(28);
+  const [period, setPeriod] = useState<StatsPeriod>(() => loadStoredPeriod());
 
   const bundle = useLiveQuery(async () => {
     const [materials, nodes, edges, tasks, attempts, regions] = await Promise.all([
@@ -87,20 +98,29 @@ export default function StatsPanel() {
       title = materials.find((m) => m.id === scope)?.title ?? 'Карта';
     }
     const stats = computeStats({ ...filtered, regions: scopeRegions }, windowDays, new Date(), difficulty);
+    // сводка за выбранный период («Сегодня»/«Неделя»/«Всё время») — для карточки «Активность»
+    const summary = computePeriodSummary({
+      nodes: filtered.nodes,
+      tasks: filtered.tasks,
+      attempts: filtered.attempts,
+      difficulty,
+      period,
+      now: new Date(),
+    });
     const sortedMaterials = [...materials].sort(
       (a, b) =>
         depthOf(a, new Map(materials.map((m) => [m.id, m]))) - depthOf(b, new Map(materials.map((m) => [m.id, m]))) ||
         a.orderIndex - b.orderIndex ||
         a.createdAt.getTime() - b.createdAt.getTime()
     );
-    return { stats, materials: sortedMaterials, title };
-  }, [bundle, scope, windowDays, difficulty]);
+    return { stats, summary, materials: sortedMaterials, title };
+  }, [bundle, scope, windowDays, difficulty, period]);
 
   if (!bundle || !view) {
     return <p className="pt-8 text-center text-sm text-muted-foreground">Загрузка…</p>;
   }
 
-  const { stats, materials, title } = view;
+  const { stats, summary, materials, title } = view;
   const percent =
     stats.nodesMasterable > 0 ? Math.round((stats.nodesMastered / stats.nodesMasterable) * 100) : 0;
   const scopeLabel = scope === 'all' ? 'Все карты' : title;
@@ -109,6 +129,15 @@ export default function StatsPanel() {
     setScope(v);
     try {
       localStorage.setItem('edu-stats-scope', v);
+    } catch {
+      /* приватный режим — просто не сохраняем */
+    }
+  };
+
+  const changePeriod = (p: StatsPeriod) => {
+    setPeriod(p);
+    try {
+      localStorage.setItem('edu-stats-period', p);
     } catch {
       /* приватный режим — просто не сохраняем */
     }
@@ -210,37 +239,55 @@ export default function StatsPanel() {
           {/* Активность по дням */}
           <DailyChart daily={stats.daily} windowDays={windowDays} />
 
-          {/* Активность: факты */}
+          {/* Активность: период (сегодня / неделя / всё время) */}
           <Card>
             <CardContent className="p-4">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-medium">
                 <Flame className="h-4 w-4 text-orange-400" />
                 Активность
               </h2>
+              <div className="mb-3 flex rounded-lg bg-muted/60 p-0.5" role="group" aria-label="Период статистики">
+                {(Object.keys(STATS_PERIOD_META) as StatsPeriod[]).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => changePeriod(p)}
+                    aria-pressed={period === p}
+                    className={cn(
+                      'flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors',
+                      period === p ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    {STATS_PERIOD_META[p].label}
+                  </button>
+                ))}
+              </div>
               <div className="grid grid-cols-4 gap-2 text-center">
                 <div className="rounded-lg bg-muted/60 p-2">
-                  <p className="text-base font-semibold">{stats.attemptsTotal}</p>
+                  <p className="text-base font-semibold">{summary.attempts}</p>
                   <p className="text-[11px] text-muted-foreground">попыток</p>
                 </div>
                 <div className="rounded-lg bg-muted/60 p-2">
-                  <p className="text-base font-semibold text-emerald-400">{Math.round(stats.accuracy * 100)}%</p>
+                  <p className="text-base font-semibold text-emerald-400">{summary.passes}</p>
+                  <p className="text-[11px] text-muted-foreground">зачётов</p>
+                </div>
+                <div className="rounded-lg bg-muted/60 p-2">
+                  <p className="text-base font-semibold">{Math.round(summary.accuracy * 100)}%</p>
                   <p className="text-[11px] text-muted-foreground">точность</p>
                 </div>
                 <div className="rounded-lg bg-muted/60 p-2">
-                  <p className="text-base font-semibold">{stats.activeDays}</p>
-                  <p className="text-[11px] text-muted-foreground">дней занятий</p>
-                </div>
-                <div className="rounded-lg bg-muted/60 p-2">
-                  <p className="text-base font-semibold text-orange-400">{stats.streakDays}</p>
-                  <p className="text-[11px] text-muted-foreground">серия (дней)</p>
+                  <p className="text-base font-semibold text-amber-400">{summary.masteredNodes}</p>
+                  <p className="text-[11px] text-muted-foreground">освоено узл.</p>
                 </div>
               </div>
+              <p className="mt-2 text-center text-[11px] text-muted-foreground">
+                За всё время: {stats.activeDays} дн. занятий · серия {stats.streakDays} дн.
+              </p>
 
-              {/* Испытания */}
+              {/* Испытания за период */}
               <div className="mt-4 flex flex-col gap-2 text-sm">
-                <TrialRow label="Объяснения (Фейнман)" icon={<Sparkles className="h-4 w-4 text-violet-400" />} data={stats.trials.feynman} />
-                <TrialRow label="Задачи" icon={<ListChecks className="h-4 w-4 text-sky-400" />} data={stats.trials.task} />
-                <TrialRow label="Свои задачи" icon={<WandSparkles className="h-4 w-4 text-emerald-400" />} data={stats.trials.own} />
+                <TrialRow label="Объяснения (Фейнман)" icon={<Sparkles className="h-4 w-4 text-violet-400" />} data={summary.trials.feynman} />
+                <TrialRow label="Задачи" icon={<ListChecks className="h-4 w-4 text-sky-400" />} data={summary.trials.task} />
+                <TrialRow label="Свои задачи" icon={<WandSparkles className="h-4 w-4 text-emerald-400" />} data={summary.trials.own} />
               </div>
             </CardContent>
           </Card>

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ClipboardPaste, ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, History, Lightbulb, Map as MapIcon, PencilLine, Play, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
+import { ClipboardPaste, ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, History, Lightbulb, Map as MapIcon, MessageCircle, PencilLine, Play, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,12 +17,13 @@ import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
 import { checkAnswer, instantiateTask, isParametric, taskProblems } from '@/lib/task-engine';
-import { isOwnRequired, isTaskRequired } from '@/lib/progress';
+import { countsForState, isOwnRequired, isTaskRequired } from '@/lib/progress';
 import { checkEssayLLM, gradeEssayLocal, gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
 import { generateTasksForNodes } from '@/lib/task-gen';
 import { essayDuplicatesFeynman } from '@/lib/text-sim';
 import { computeSrsForNode, fmtDay, intervalFor, SRS_LADDER_DAYS, type SrsInfo } from '@/lib/srs';
 import { AnswerHelpers, appendChunk } from '@/components/app/AnswerHelpers';
+import IdeaChat from '@/components/app/IdeaChat';
 import type { Attempt, EssayGrade, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -37,6 +38,8 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
   const data = useMaterialData(activeMaterialId);
   // генерация задач прямо из карточки «узел без задач» (одна кнопка, без редактора)
   const [genBusy, setGenBusy] = useState(false);
+  // обсуждение идеи с ИИ (полноэкранный чат поверх узла)
+  const [chatOpen, setChatOpen] = useState(false);
 
   // живые данные узла
   const bundle = useLiveQuery(async () => {
@@ -55,9 +58,13 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
   }, [nodeId]);
 
   const latest = useMemo(() => {
+    // официальное состояние испытаний: пробные (exploratory) попытки в зачёт не идут
     const map = new Map<string, Attempt>();
     const sorted = [...(bundle?.attempts ?? [])].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-    for (const a of sorted) map.set(`${a.kind}|${a.taskId ?? ''}`, a);
+    for (const a of sorted) {
+      if (!countsForState(a)) continue;
+      map.set(`${a.kind}|${a.taskId ?? ''}`, a);
+    }
     return map;
   }, [bundle?.attempts]);
 
@@ -133,6 +140,9 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
             <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{region?.title}</p>
             <h1 className="truncate text-base font-semibold">{node.title}</h1>
           </div>
+          <Button variant="ghost" size="icon" onClick={() => setChatOpen(true)} aria-label="Обсудить идею с ИИ">
+            <MessageCircle className="h-5 w-5" />
+          </Button>
           <Button variant="ghost" size="icon" onClick={() => openNodeEditor(node.id)} aria-label="Редактор узла">
             <PencilLine className="h-5 w-5" />
           </Button>
@@ -164,7 +174,7 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
           )}
 
           {/* Карточка идеи */}
-          <IdeaCard node={node} />
+          <IdeaCard node={node} onDiscuss={() => setChatOpen(true)} />
 
           {/* Непроходимый узел: задач нет — генерация одной кнопкой или редактор */}
           {tasks.length === 0 && (
@@ -243,6 +253,9 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
           <OwnTaskTrial key={`o:${nodeId}`} node={node} attempt={ownA} provider={activeProvider} optional={!ownRequired} />
         </div>
       </div>
+
+      {/* Обсуждение идеи с ИИ — поверх экрана узла */}
+      {chatOpen && <IdeaChat node={node} provider={activeProvider} onClose={() => setChatOpen(false)} />}
     </div>
   );
 }
@@ -273,7 +286,7 @@ function TrialChip({ label, done, optional }: { label: string; done: boolean; op
 
 // ============ Карточка идеи ============
 
-function IdeaCard({ node }: { node: IdeaNode }) {
+function IdeaCard({ node, onDiscuss }: { node: IdeaNode; onDiscuss: () => void }) {
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4">
@@ -320,6 +333,9 @@ function IdeaCard({ node }: { node: IdeaNode }) {
             </DialogContent>
           </Dialog>
         )}
+        <Button variant="ghost" size="sm" className="self-start text-muted-foreground" onClick={onDiscuss}>
+          <MessageCircle className="mr-1.5 h-4 w-4" /> Обсудить идею с ИИ
+        </Button>
       </CardContent>
     </Card>
   );
@@ -346,6 +362,9 @@ function FeynmanTrial({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<FeynmanGrade | null>(null);
   const passed = attempt?.verdict === 'pass';
+  // переответ после зачёта: пробная проверка другой формулировки (зачёт не меняется)
+  const [retake, setRetake] = useState(false);
+  const [explorGrade, setExplorGrade] = useState<FeynmanGrade | null>(null);
 
   const submit = async () => {
     if (text.trim().length < 10) {
@@ -368,9 +387,14 @@ function FeynmanTrial({
         score: (grade.accuracy / 2) * 0.5 + (grade.completeness / 2) * 0.3 + grade.ownWords * 0.2,
         feedback: grade.feedback,
         details: JSON.stringify({ accuracy: grade.accuracy, completeness: grade.completeness, ownWords: grade.ownWords, misconceptions: grade.misconceptions }),
+        // попытка после зачёта — пробная: зачёт не снимает и не даёт нового
+        ...(passed ? { exploratory: true } : {}),
         createdAt: new Date(),
       });
-      if (grade.verdict === 'pass') toast.success('Фейнман пройден!');
+      if (passed) {
+        setExplorGrade(grade);
+        toast.info('Новый разбор готов — зачёт сохранён');
+      } else if (grade.verdict === 'pass') toast.success('Фейнман пройден!');
       else toast.error('Пока не зачтено — см. разбор');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Ошибка проверки');
@@ -404,7 +428,7 @@ function FeynmanTrial({
         <AnswerHelpers
           variant="feynman"
           onAppend={(chunk) => setText((prev) => appendChunk(prev ?? '', chunk))}
-          disabled={busy || passed}
+          disabled={busy || (passed && !retake)}
         />
         <PhotoOcr
           mode="full"
@@ -412,12 +436,46 @@ function FeynmanTrial({
           onInsert={(t) => setText((prev) => (prev ? `${prev}\n${t}` : t))}
           disabled={busy}
         />
-        {!passed && (
-          <Button onClick={submit} disabled={busy}>
-            {busy ? 'Проверяем…' : <><Send className="mr-1 h-4 w-4" /> Проверить</>}
+        {passed && !retake && (
+          <div className="flex flex-col gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 self-start px-2 text-xs text-muted-foreground"
+              onClick={() => setRetake(true)}
+            >
+              <RefreshCw className="mr-1 h-3.5 w-3.5" /> Ответить снова
+            </Button>
+            <p className="text-[11px] leading-snug text-muted-foreground/80">
+              Можно сформулировать иначе и увидеть новый разбор — зачёт по прежнему ответу сохранится.
+            </p>
+          </div>
+        )}
+        {(!passed || retake) && (
+          <Button onClick={submit} disabled={busy} variant={passed ? 'outline' : 'default'}>
+            {busy ? (
+              'Проверяем…'
+            ) : passed ? (
+              <>
+                <Send className="mr-1 h-4 w-4" /> Проверить (пробно)
+              </>
+            ) : (
+              <>
+                <Send className="mr-1 h-4 w-4" /> Проверить
+              </>
+            )}
           </Button>
         )}
-        {shown && <GradeResult grade={shown} />}
+        {retake && explorGrade ? (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Пробная проверка · зачёт сохранён
+            </p>
+            <GradeResult grade={explorGrade} />
+          </div>
+        ) : (
+          shown && <GradeResult grade={shown} />
+        )}
       </CardContent>
     </Card>
   );
@@ -517,6 +575,13 @@ function TaskTrial({
   });
 
   const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(attempt?.verdict === 'pass' ? 'pass' : null);
+  // переответ после зачёта: пробная проверка другой формулировки (зачёт не меняется)
+  const [retake, setRetake] = useState(false);
+  const [explor, setExplor] = useState<{
+    verdict: 'pass' | 'fail';
+    essay?: EssayGrade;
+    correctAnswer?: string;
+  } | null>(null);
   const [correctShown, setCorrectShown] = useState<string | null>(null);
   const [hintLevel, setHintLevel] = useState(0);
   const [llmHints, setLlmHints] = useState<Record<number, string>>({});
@@ -568,9 +633,12 @@ function TaskTrial({
     setRoll((n) => n + 1);
     setInput('');
     setChoiceIdx(null);
-    setVerdict(null);
     setCorrectShown(null);
     setHintLevel(0);
+    // в пробном режиме новая формулировка продолжает пробную проверку,
+    // в обычном — сбрасывает вердикт задачи
+    if (passed) setExplor(null);
+    else setVerdict(null);
   };
 
   const submit = async () => {
@@ -587,8 +655,13 @@ function TaskTrial({
         const grade = provider
           ? await checkEssayLLM(provider, task, node, answer)
           : gradeEssayLocal(task.answerSpec.kind === 'essay' ? task.answerSpec.expectation : [], answer);
-        setVerdict(grade.verdict);
-        setEssayResult(grade);
+        if (passed) {
+          // пробная проверка после зачёта — вердикт задачи не трогаем
+          setExplor({ verdict: grade.verdict, essay: grade });
+        } else {
+          setVerdict(grade.verdict);
+          setEssayResult(grade);
+        }
         await db.attempts.put({
           id: crypto.randomUUID(),
           materialId: node.materialId,
@@ -600,9 +673,12 @@ function TaskTrial({
           score: grade.score,
           feedback: grade.feedback,
           details: JSON.stringify({ missed: grade.missed }),
+          ...(passed ? { exploratory: true } : {}),
           createdAt: new Date(),
         });
-        if (grade.verdict === 'pass') toast.success('Ответ зачтён!');
+        if (passed) {
+          toast.info(grade.verdict === 'pass' ? 'Пробная проверка: зачтено' : 'Пробная проверка: не зачтено — зачёт сохранён');
+        } else if (grade.verdict === 'pass') toast.success('Ответ зачтён!');
         else toast.error('Пока не зачтено — см. разбор');
       } catch (e) {
         toast.error(e instanceof Error ? e.message : 'Ошибка проверки');
@@ -613,8 +689,13 @@ function TaskTrial({
     }
     const userInput = task.type === 'choice' ? String(choiceIdx ?? -1) : input;
     const res = checkAnswer(instance, task.answerSpec, userInput);
-    setVerdict(res.verdict);
-    setCorrectShown(res.verdict === 'fail' ? res.correctAnswer ?? null : null);
+    if (passed) {
+      // пробная проверка после зачёта — вердикт задачи не трогаем
+      setExplor({ verdict: res.verdict, correctAnswer: res.correctAnswer ?? undefined });
+    } else {
+      setVerdict(res.verdict);
+      setCorrectShown(res.verdict === 'fail' ? res.correctAnswer ?? null : null);
+    }
     await db.attempts.put({
       id: crypto.randomUUID(),
       materialId: node.materialId,
@@ -623,9 +704,12 @@ function TaskTrial({
       taskId: task.id,
       userAnswer: task.type === 'choice' ? task.answerSpec.kind === 'choice' ? task.answerSpec.options[choiceIdx ?? -1] ?? '—' : userInput : userInput,
       verdict: res.verdict,
+      ...(passed ? { exploratory: true } : {}),
       createdAt: new Date(),
     });
-    if (res.verdict === 'pass') toast.success('Верно!');
+    if (passed) {
+      toast.info(res.verdict === 'pass' ? 'Пробная проверка: зачтено' : 'Пробная проверка: не зачтено — зачёт сохранён');
+    } else if (res.verdict === 'pass') toast.success('Верно!');
     else toast.error('Неверно. Попробуй ещё — или открой подсказку');
   };
 
@@ -657,7 +741,7 @@ function TaskTrial({
           step={2}
           title={`Задача ${index + 1}`}
           done={passed}
-          right={isParametric(task) && !passed ? (
+          right={isParametric(task) && (!passed || retake) ? (
             <Button variant="ghost" size="sm" onClick={reRandomize} className="h-7 px-2 text-xs text-muted-foreground">
               <RefreshCw className="mr-1 h-3 w-3" /> другой вариант
             </Button>
@@ -695,7 +779,7 @@ function TaskTrial({
             {choiceSpec.options.map((opt, i) => (
               <button
                 key={i}
-                disabled={passed || broken}
+                disabled={broken || (passed && !retake)}
                 onClick={() => setChoiceIdx(i)}
                 className={cn(
                   'rounded-lg border px-3 py-2.5 text-left text-sm transition-colors',
@@ -712,12 +796,12 @@ function TaskTrial({
             <Textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              disabled={passed || broken || essayBusy}
+              disabled={broken || essayBusy || (passed && !retake)}
               placeholder="Развёрнутый ответ своими словами…"
               rows={5}
               className="resize-none"
             />
-            {!passed && !broken && (
+            {(!passed || retake) && !broken && (
               <AnswerHelpers
                 variant="essay"
                 onAppend={(chunk) => setInput((prev) => appendChunk(prev ?? '', chunk))}
@@ -736,7 +820,7 @@ function TaskTrial({
                 отправляй как есть.
               </p>
             )}
-            {!passed && !broken && feynmanAnswer && !transferred && (
+            {(!passed || retake) && !broken && feynmanAnswer && !transferred && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -748,7 +832,7 @@ function TaskTrial({
                 {armReplace ? 'Ещё раз — заменит набранный ответ' : 'Вставить ответ Фейнмана'}
               </Button>
             )}
-            {!passed && !broken && (
+            {(!passed || retake) && !broken && (
               <PhotoOcr
                 mode="full"
                 label="Фото с решением"
@@ -765,8 +849,8 @@ function TaskTrial({
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !passed && !broken && submit()}
-              disabled={passed || broken}
+              onKeyDown={(e) => e.key === 'Enter' && (!passed || retake) && !broken && submit()}
+              disabled={broken || (passed && !retake)}
               placeholder={
                 task.type === 'code_output' ? 'Вывод программы' : task.type === 'code_fill' ? 'Недостающий фрагмент кода' : 'Ответ'
               }
@@ -786,10 +870,26 @@ function TaskTrial({
           </div>
         )}
 
-        {!passed && (
+        {passed && !retake && (
+          <div className="flex flex-col gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 self-start px-2 text-xs text-muted-foreground"
+              onClick={() => setRetake(true)}
+            >
+              <RefreshCw className="mr-1 h-3.5 w-3.5" /> Ответить снова
+            </Button>
+            <p className="text-[11px] leading-snug text-muted-foreground/80">
+              Можно ответить иначе (для параметрической — «другой вариант») и увидеть новый разбор — зачёт сохранится.
+            </p>
+          </div>
+        )}
+
+        {(!passed || retake) && (
           <div className="flex gap-2">
-            <Button onClick={submit} className="flex-1" disabled={broken || essayBusy}>
-              {essayBusy ? 'Проверяем…' : 'Ответить'}
+            <Button onClick={submit} className="flex-1" variant={passed ? 'outline' : 'default'} disabled={broken || essayBusy}>
+              {essayBusy ? 'Проверяем…' : passed ? 'Проверить (пробно)' : 'Ответить'}
             </Button>
             <Button variant="outline" onClick={showHint} disabled={hintLevel >= 3 && !provider}>
               <Lightbulb className="mr-1 h-4 w-4" /> Подсказка {Math.min(hintLevel + 1, 3)}/3
@@ -848,6 +948,55 @@ function TaskTrial({
             </div>
           );
         })()}
+
+        {/* Результат пробной проверки (переответ после зачёта) */}
+        {explor && passed && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Пробная проверка · зачёт сохранён
+            </p>
+            <div className={cn('rounded-xl border p-3', explor.verdict === 'pass' ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5')}>
+              {explor.essay ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge variant="secondary" className="gap-1">Раскрыто {Math.round(explor.essay.score * 100)}%</Badge>
+                    {explor.verdict === 'pass' ? (
+                      <span className="ml-auto flex items-center gap-1 text-xs font-medium text-emerald-400"><CheckCircle2 className="h-4 w-4" /> зачтено</span>
+                    ) : (
+                      <span className="ml-auto flex items-center gap-1 text-xs font-medium text-amber-400"><XCircle className="h-4 w-4" /> доработай ответ</span>
+                    )}
+                  </div>
+                  {explor.essay.missed.length > 0 && (
+                    <div className="mt-2">
+                      <p className="text-xs font-medium text-muted-foreground">Не раскрыто:</p>
+                      <ul className="mt-0.5 list-disc space-y-0.5 pl-5 text-xs text-amber-300">
+                        {explor.essay.missed.map((m, i) => (
+                          <li key={i}><RichText>{m}</RichText></li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {explor.essay.feedback && (
+                    <p className="mt-2 text-sm leading-snug text-muted-foreground"><RichText>{explor.essay.feedback}</RichText></p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm">
+                  {explor.verdict === 'pass' ? (
+                    <span className="text-emerald-300">Верно!</span>
+                  ) : (
+                    <span className="text-amber-300">
+                      Неверно.
+                      {explor.correctAnswer && (
+                        <> Правильный ответ: <b className={isCode ? 'font-mono' : undefined}>{explor.correctAnswer}</b>.</>
+                      )}
+                    </span>
+                  )}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -877,6 +1026,9 @@ function OwnTaskTrial({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<OwnTaskVerdict | null>(null);
   const passed = attempt?.verdict === 'pass';
+  // переответ после зачёта: пробная проверка другой задачи (зачёт не меняется)
+  const [retake, setRetake] = useState(false);
+  const [explorResult, setExplorResult] = useState<OwnTaskVerdict | null>(null);
 
   const submit = async () => {
     if (text.trim().length < 10) {
@@ -887,6 +1039,7 @@ function OwnTaskTrial({
     try {
       const v = provider ? await validateOwnTaskLLM(provider, node, text.trim()) : validateOwnTaskLocal(text.trim());
       setResult(v);
+      if (passed) setExplorResult(v);
       await db.attempts.put({
         id: crypto.randomUUID(),
         materialId: node.materialId,
@@ -895,9 +1048,13 @@ function OwnTaskTrial({
         userAnswer: text.trim(),
         verdict: v.verdict,
         feedback: v.feedback,
+        // попытка после зачёта — пробная: зачёт не снимает и не даёт нового
+        ...(passed ? { exploratory: true } : {}),
         createdAt: new Date(),
       });
-      if (v.verdict === 'pass') toast.success('Задача зачтена!');
+      if (passed) {
+        toast.info(v.verdict === 'pass' ? 'Пробная проверка: зачтено' : 'Пробная проверка: не зачтено — зачёт сохранён');
+      } else if (v.verdict === 'pass') toast.success('Задача зачтена!');
       else toast.error('Задачу нужно доработать');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Ошибка проверки');
@@ -906,7 +1063,12 @@ function OwnTaskTrial({
     }
   };
 
-  const shown = result ?? (attempt ? { onTopic: true, solvable: true, answer: '', feedback: attempt.feedback ?? '', verdict: attempt.verdict as 'pass' | 'fail' } : null);
+  const shown =
+    retake && explorResult
+      ? explorResult
+      : result ?? (attempt
+          ? { onTopic: true, solvable: true, answer: '', feedback: attempt.feedback ?? '', verdict: attempt.verdict as 'pass' | 'fail' }
+          : null);
 
   return (
     <Card>
@@ -932,7 +1094,7 @@ function OwnTaskTrial({
         <AnswerHelpers
           variant="own"
           onAppend={(chunk) => setText((prev) => appendChunk(prev ?? '', chunk))}
-          disabled={busy || passed}
+          disabled={busy || (passed && !retake)}
         />
         <PhotoOcr
           mode="full"
@@ -940,35 +1102,67 @@ function OwnTaskTrial({
           onInsert={(t) => setText((prev) => (prev ? `${prev}\n${t}` : t))}
           disabled={busy}
         />
-        {!passed && (
-          <Button onClick={submit} disabled={busy}>
-            {busy ? 'Проверяем…' : <><Send className="mr-1 h-4 w-4" /> Отправить</>}
+        {passed && !retake && (
+          <div className="flex flex-col gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 self-start px-2 text-xs text-muted-foreground"
+              onClick={() => setRetake(true)}
+            >
+              <RefreshCw className="mr-1 h-3.5 w-3.5" /> Придумать другую задачу
+            </Button>
+            <p className="text-[11px] leading-snug text-muted-foreground/80">
+              Можно сформулировать другую задачу и увидеть новый разбор — зачёт сохранится.
+            </p>
+          </div>
+        )}
+        {(!passed || retake) && (
+          <Button onClick={submit} disabled={busy} variant={passed ? 'outline' : 'default'}>
+            {busy ? (
+              'Проверяем…'
+            ) : passed ? (
+              <>
+                <Send className="mr-1 h-4 w-4" /> Проверить (пробно)
+              </>
+            ) : (
+              <>
+                <Send className="mr-1 h-4 w-4" /> Отправить
+              </>
+            )}
           </Button>
         )}
         {shown && (
-          <div className={cn('rounded-xl border p-3 text-sm', shown.verdict === 'pass' ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5')}>
-            <div className="flex flex-wrap gap-1.5">
-              <Badge variant="secondary">на тему: {shown.onTopic ? 'да' : 'нет'}</Badge>
-              <Badge variant="secondary">решаема: {shown.solvable ? 'да' : 'нет'}</Badge>
-              {shown.verdict === 'pass' ? (
-                <span className="ml-auto flex items-center gap-1 text-xs font-medium text-emerald-400"><CheckCircle2 className="h-4 w-4" /> зачтено</span>
-              ) : (
-                <span className="ml-auto flex items-center gap-1 text-xs font-medium text-amber-400"><XCircle className="h-4 w-4" /> доработай</span>
+          <div className="flex flex-col gap-1.5">
+            {retake && explorResult && (
+              <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Пробная проверка · зачёт сохранён
+              </p>
+            )}
+            <div className={cn('rounded-xl border p-3 text-sm', shown.verdict === 'pass' ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5')}>
+              <div className="flex flex-wrap gap-1.5">
+                <Badge variant="secondary">на тему: {shown.onTopic ? 'да' : 'нет'}</Badge>
+                <Badge variant="secondary">решаема: {shown.solvable ? 'да' : 'нет'}</Badge>
+                {shown.verdict === 'pass' ? (
+                  <span className="ml-auto flex items-center gap-1 text-xs font-medium text-emerald-400"><CheckCircle2 className="h-4 w-4" /> зачтено</span>
+                ) : (
+                  <span className="ml-auto flex items-center gap-1 text-xs font-medium text-amber-400"><XCircle className="h-4 w-4" /> доработай</span>
+                )}
+              </div>
+              {shown.answer && (
+                <p className="mt-2 text-muted-foreground">
+                  Ответ проверяющего:{' '}
+                  <b className="text-foreground">
+                    <RichText>{shown.answer}</RichText>
+                  </b>
+                </p>
+              )}
+              {shown.feedback && (
+                <p className="mt-1.5 leading-snug text-muted-foreground">
+                  <RichText>{shown.feedback}</RichText>
+                </p>
               )}
             </div>
-            {shown.answer && (
-              <p className="mt-2 text-muted-foreground">
-                Ответ проверяющего:{' '}
-                <b className="text-foreground">
-                  <RichText>{shown.answer}</RichText>
-                </b>
-              </p>
-            )}
-            {shown.feedback && (
-              <p className="mt-1.5 leading-snug text-muted-foreground">
-                <RichText>{shown.feedback}</RichText>
-              </p>
-            )}
           </div>
         )}
       </CardContent>

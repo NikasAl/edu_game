@@ -16,7 +16,7 @@
  * Лестница интервалов (дней): 1 → 3 → 7 → 16 → 35 → 70, дальше не растёт.
  */
 import type { Attempt, IdeaNode, Task } from './types';
-import { isOwnRequired, isTaskRequired, type DifficultyMode } from './progress';
+import { countsForState, isOwnRequired, isTaskRequired, type DifficultyMode } from './progress';
 
 export const SRS_LADDER_DAYS = [1, 3, 7, 16, 35, 70];
 
@@ -62,11 +62,15 @@ export function computeSrsForNode(
   if (nodeTasks.length === 0) return null;
 
   // Последняя попытка по ключу испытания — те же правила, что в NodeView/stats
+  // (пробные exploratory-попытки не участвуют в правилах зачёта)
   const sorted = attempts
     .filter((a) => a.nodeId === node.id)
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const latest = new Map<string, Attempt>();
-  for (const a of sorted) latest.set(`${a.kind}|${a.taskId ?? ''}`, a);
+  for (const a of sorted) {
+    if (!countsForState(a)) continue;
+    latest.set(`${a.kind}|${a.taskId ?? ''}`, a);
+  }
 
   const feynman = latest.get('feynman|');
   const own = latest.get('own|');
