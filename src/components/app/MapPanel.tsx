@@ -23,6 +23,7 @@ import {
   Map as MapIcon,
   Search,
   TriangleAlert,
+  Wand2,
   Waypoints,
   X,
 } from 'lucide-react';
@@ -37,6 +38,7 @@ import { childrenOf, getPathToRoot } from '@/lib/maps';
 import { enrichGraph } from '@/lib/graph-db';
 import { buildMapView, navOrder, type RegionShell } from '@/lib/map-view';
 import { COL_W, LAYER_H, layoutGraph } from '@/lib/progress';
+import { generateTasksForNodes, nodesWithoutTasks } from '@/lib/task-gen';
 import {
   NODE_STATUS_META,
   type IdeaEdge,
@@ -246,6 +248,10 @@ function MapPanelInner({ materialId }: { materialId: string }) {
   const rfRef = useRef<ReactFlowInstance | null>(null);
   const [building, setBuilding] = useState(false);
   const [buildMsg, setBuildMsg] = useState<string | null>(null);
+  // догенерация задач узлам без задач (массовая, одной кнопкой)
+  const [genBusy, setGenBusy] = useState(false);
+  const [genMsg, setGenMsg] = useState<string | null>(null);
+  const cancelGenRef = useRef(false);
   const [collapsedRegions, setCollapsedRegions] = useState<Set<string>>(
     () => collapsedCache.get(materialId) ?? new Set()
   );
@@ -459,6 +465,53 @@ function MapPanelInner({ materialId }: { materialId: string }) {
     }
   }, [materialId, activeProvider, building, data.nodes.length]);
 
+  /** Узлы карты без задач — они непроходимы и запирают нижние слои */
+  const missingTasks = useMemo(
+    () => (data.ready ? nodesWithoutTasks(data.nodes, data.tasks) : []),
+    [data.ready, data.nodes, data.tasks]
+  );
+
+  /** Догенерировать задачи всем узлам без задач (по одному LLM-вызову на узел) */
+  const runTaskGen = useCallback(async () => {
+    if (!materialId || genBusy || building) return;
+    if (!activeProvider) {
+      toast.error('LLM-провайдер не подключён — настрой его во вкладке «Настройки»');
+      return;
+    }
+    const d = dataRef.current;
+    const targets = d ? nodesWithoutTasks(d.nodes, d.tasks) : [];
+    if (targets.length === 0) {
+      toast.info('У всех узлов есть задачи');
+      return;
+    }
+    setGenBusy(true);
+    cancelGenRef.current = false;
+    setGenMsg(`Генерация задач 0/${targets.length}…`);
+    try {
+      const r = await generateTasksForNodes(activeProvider, targets, {
+        onProgress: setGenMsg,
+        isCancelled: () => cancelGenRef.current,
+      });
+      if (r.generated === 0 && r.skipped === 0) {
+        toast.error('Ни у одного узла не удалось сгенерировать задачи — проверь провайдера и попробуй позже');
+      } else {
+        toast.success(
+          `Готово: задач добавлено ${r.tasksAdded} у ${r.generated} узлов` +
+            (r.brokenTasks > 0 ? ` · битых: ${r.brokenTasks} (правятся в редакторе узла)` : '') +
+            (r.failed > 0
+              ? ` · не удалось: ${r.failed} (${r.failedTitles.slice(0, 3).join(', ')}${r.failedTitles.length > 3 ? '…' : ''})`
+              : '')
+        );
+      }
+      if (cancelGenRef.current) toast('Генерация остановлена — сделанное сохранено');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось догенерировать задачи');
+    } finally {
+      setGenBusy(false);
+      setGenMsg(null);
+    }
+  }, [materialId, genBusy, building, activeProvider]);
+
   /**
    * При открытии карты камера встаёт на текущий узел (золотой путь) —
    * он в фокусе и читается. Пока пользователь сам не подвигал карту,
@@ -576,6 +629,25 @@ function MapPanelInner({ materialId }: { materialId: string }) {
               title="Список узлов и поиск"
             >
               <Search className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => void runTaskGen()}
+              disabled={genBusy || building || !activeProvider || missingTasks.length === 0}
+              title={
+                !activeProvider
+                  ? 'Нужен LLM-провайдер (Настройки)'
+                  : missingTasks.length === 0
+                    ? 'У всех узлов есть задачи'
+                    : `Сгенерировать задачи для ${missingTasks.length} узлов без задач — карта станет проходимой`
+              }
+            >
+              {genBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+              <span className="hidden sm:inline">
+                Догенерировать задачи{missingTasks.length > 0 ? ` (${missingTasks.length})` : ''}
+              </span>
             </Button>
             <Button
               variant="outline"
@@ -723,6 +795,26 @@ function MapPanelInner({ materialId }: { materialId: string }) {
                 <div className="flex items-center gap-2 rounded-full border border-border bg-card/95 px-4 py-2 text-xs shadow-lg">
                   <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
                   <span className="max-w-[60vw] truncate">{buildMsg}</span>
+                </div>
+              </Panel>
+            )}
+
+            {/* Прогресс догенерации задач — с кнопкой остановки (сделанное сохраняется) */}
+            {genBusy && (
+              <Panel position="bottom-center">
+                <div className="flex items-center gap-2 rounded-full border border-border bg-card/95 px-4 py-2 text-xs shadow-lg">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+                  <span className="max-w-[55vw] truncate">{genMsg}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      cancelGenRef.current = true;
+                    }}
+                    className="rounded-full p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    title="Остановить (сделанное сохранится)"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </Panel>
             )}

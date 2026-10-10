@@ -584,6 +584,59 @@ export function gradeEssayLocal(expectation: string[], userAnswer: string): Essa
   };
 }
 
+// ============ 2б-2. Переформулировка эссе, дублирующего вопрос Фейнмана ============
+
+const ESSAY_DIFFERENTIATE_PROMPT = `В курсе эссе-задача почти дословно повторяет фейнмановский вопрос узла: студент будет писать один и тот же развёрнутый ответ дважды. Перепиши эссе-задачу так, чтобы она проверяла ТУ ЖЕ идею с ДРУГОЙ стороны и не дублировала феймановское объяснение.
+
+Возможные ракурсы (выбери подходящий):
+- применение идеи к новой ситуации или конкретным данным;
+- сравнение с близким понятием: отличия, контрпример, граничный случай;
+- следствие идеи: что из неё вытекает, где её нельзя применить;
+- типичное заблуждение: почему наивное рассуждение неверно.
+
+Требования:
+- вопрос остаётся открытым (развёрнутый ответ своими словами), уровень сложности — как у исходного эссе;
+- в формулировке не повторяй слова и обороты феймановского вопроса;
+- expectation — 3–5 ключевых пунктов полного ответа на НОВОЙ формулировке;
+- пиши по-русски, формулы — LaTeX ($...$).
+
+Верни СТРОГО JSON:
+{"prompt":"новая формулировка вопроса","expectation":["пункт 1","пункт 2","пункт 3"]}`;
+
+export async function differentiateEssayLLM(
+  provider: LLMProvider,
+  node: { title: string; formulation: string; example: string; feynmanQuestion: string },
+  task: Task
+): Promise<{ prompt: string; expectation: string[] }> {
+  const spec = task.answerSpec.kind === 'essay' ? task.answerSpec : null;
+  const messages: LLMMessage[] = [
+    { role: 'system', content: SYSTEM },
+    {
+      role: 'user',
+      content: `${ESSAY_DIFFERENTIATE_PROMPT}\n\nИдея: «${node.title}» — ${node.formulation}\nПример из материала: ${node.example}\nФеймановский вопрос (повторять его нельзя): ${node.feynmanQuestion}\n\nТекущая эссе-задача: ${task.prompt}\nЕё ключевые пункты: ${spec ? spec.expectation.join('; ') || '—' : '—'}`,
+    },
+  ];
+  const parsed = await callLLMJson<{ prompt: string; expectation: string[] }>(provider, messages, {
+    op: 'differentiate_essay',
+    temperature: 0.4,
+    maxTokens: 8000,
+    validate: (p) => {
+      if (!String(p.prompt ?? '').trim()) return 'пустой prompt';
+      if (!Array.isArray(p.expectation) || p.expectation.filter((e) => String(e).trim()).length < 2) {
+        return 'expectation должен содержать минимум 2 непустых пункта';
+      }
+      return null;
+    },
+  });
+  return {
+    prompt: String(parsed.prompt).trim().slice(0, 4000),
+    expectation: parsed.expectation
+      .slice(0, 6)
+      .map((s) => String(s).trim().slice(0, 300))
+      .filter(Boolean),
+  };
+}
+
 // ============ 2в. Проход построения графа зависимостей ============
 
 /**

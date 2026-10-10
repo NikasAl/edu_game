@@ -37,12 +37,14 @@ import { useAppStore } from '@/store/useAppStore';
 import {
   checkIdeaLLM,
   checkTaskLLM,
+  differentiateEssayLLM,
   fixIdeaLLM,
   fixTaskLLM,
   genTasksForAtom,
   generatedToTask,
   type CheckReport,
 } from '@/lib/llm-ops';
+import { essayDuplicatesFeynman } from '@/lib/text-sim';
 import { evalExpr } from '@/lib/safeMath';
 import { instantiateTask, taskProblems } from '@/lib/task-engine';
 import type {
@@ -600,7 +602,7 @@ function TaskEditorCard({
   const [hint1, setHint1] = useState(task.hints[0] ?? '');
   const [hint2, setHint2] = useState(task.hints[1] ?? '');
   const [explanation, setExplanation] = useState(task.explanation);
-  const [busy, setBusy] = useState<'save' | 'check' | 'fix' | null>(null);
+  const [busy, setBusy] = useState<'save' | 'check' | 'fix' | 'diff' | null>(null);
   const [report, setReport] = useState<CheckReport | null>(NO_REPORT);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [reroll, setReroll] = useState(0);
@@ -844,6 +846,32 @@ function TaskEditorCard({
 
   const options = type === 'choice' && spec.spec.kind === 'choice' ? spec.spec.options : [];
 
+  /** Эссе почти дословно повторяет вопрос Фейнмана — студент будет писать одно и то же дважды */
+  const dupEssay = type === 'essay' && essayDuplicatesFeynman(prompt, node.feynmanQuestion);
+
+  /** Переформулировать эссе-дубликат под другой ракурс (LLM), не трогая сохранённое до «Сохранить» */
+  const differentiate = async () => {
+    if (!provider) {
+      toast.error('Для переформулировки нужен LLM-провайдер (Настройки)');
+      return;
+    }
+    if (!prompt.trim()) {
+      toast.error('Сначала заполни условие задачи');
+      return;
+    }
+    setBusy('diff');
+    try {
+      const r = await differentiateEssayLLM(provider, node, draft.task);
+      setPrompt(r.prompt);
+      setExpectationText(r.expectation.join('\n'));
+      toast.success('Новая формулировка подставлена — проверь и сохрани');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Ошибка переформулировки');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4">
@@ -860,6 +888,34 @@ function TaskEditorCard({
 
         {open && (
           <>
+            {dupEssay && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+                <p className="flex items-center gap-1.5 font-medium text-amber-300">
+                  <AlertTriangle className="h-3.5 w-3.5" /> Эссе повторяет вопрос Фейнмана
+                </p>
+                <p className="mt-1 leading-snug text-amber-200/90">
+                  Студент будет писать один и тот же развёрнутый ответ дважды. На экране узла готовый ответ уже
+                  переносится одной кнопкой, но лучше развести задания: удалить дубликат или переформулировать под
+                  другой ракурс (применение, сравнение, следствие).
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" onClick={del}>
+                    <Trash2 className="mr-1 h-3.5 w-3.5" />
+                    {confirmDelete ? 'Точно удалить?' : 'Удалить дубликат'}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => void differentiate()} disabled={busy !== null}>
+                    {busy === 'diff' ? (
+                      'Формулируем…'
+                    ) : (
+                      <>
+                        <Sparkles className="mr-1 h-3.5 w-3.5" /> Переформулировать (ИИ)
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-col gap-1.5">
               <Label className="text-xs text-muted-foreground">Условие (формулы LaTeX в $…$, подстановки {'{{param}}'})</Label>
               <Textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} className="resize-none" />

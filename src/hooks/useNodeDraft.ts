@@ -81,14 +81,21 @@ export function useNodeDraft(
   return [value, setValue];
 }
 
-/** Ответ на конкретную задачу: текст (numeric/exact) и выбранный вариант (choice) */
-export function useTaskAnswerDraft(opts: DraftOpts & { taskId: string; attemptChoiceIdx?: number }): {
+/**
+ * Ответ на конкретную задачу: текст (numeric/exact) и выбранный вариант (choice).
+ *
+ * autoFillText — готовый текст, подставляемый в ПУСТОЕ поле (нет ни черновика,
+ * ни попытки): перенос ответа Фейнмана в эссе-дубликат, чтобы не писать
+ * одно и то же дважды. Черновик/попытка всегда приоритетнее — автозаполнение
+ * не перетирает ни сохранённое, ни набранное.
+ */
+export function useTaskAnswerDraft(opts: DraftOpts & { taskId: string; attemptChoiceIdx?: number; autoFillText?: string }): {
   input: string;
   setInput: TextSetter;
   choiceIdx: number | null;
   setChoiceIdx: (i: number | null) => void;
 } {
-  const { nodeId, materialId, taskId, attemptAnswer, attemptChoiceIdx } = opts;
+  const { nodeId, materialId, taskId, attemptAnswer, attemptChoiceIdx, autoFillText } = opts;
   const [input, setInput] = useState('');
   const [choiceIdx, setChoiceIdxState] = useState<number | null>(null);
   const seededRef = useRef(false);
@@ -109,7 +116,7 @@ export function useTaskAnswerDraft(opts: DraftOpts & { taskId: string; attemptCh
       if (!alive) return;
       const savedText = draft?.taskAnswers?.[taskId] ?? '';
       const savedChoice = draft?.taskChoices?.[taskId];
-      setInput(savedText || attemptAnswer || '');
+      setInput(savedText || attemptAnswer || autoFillText || '');
       setChoiceIdxState(
         typeof savedChoice === 'number'
           ? savedChoice
@@ -122,7 +129,19 @@ export function useTaskAnswerDraft(opts: DraftOpts & { taskId: string; attemptCh
     return () => {
       alive = false;
     };
-  }, [nodeId, taskId]);
+  }, [nodeId, taskId]); // attemptAnswer/autoFillText осознанно не в зависимостях: сид один раз при монтировании
+
+  // Догоняющее автозаполнение: autoFillText появился ПОСЛЕ монтирования
+  // (попытка Фейнмана отправлена, пока узел открыт) — заполняем пустое поле,
+  // не перетирая ни черновик/попытку, ни то, что пользователь успел набрать.
+  const prevAutoFillRef = useRef(autoFillText);
+  useEffect(() => {
+    if (prevAutoFillRef.current === autoFillText) return;
+    prevAutoFillRef.current = autoFillText;
+    if (!autoFillText || !seededRef.current) return;
+    if (inputRef.current.trim()) return;
+    setInput(autoFillText);
+  }, [autoFillText]);
 
   // единый дебаунс на оба поля задачи
   useEffect(() => {

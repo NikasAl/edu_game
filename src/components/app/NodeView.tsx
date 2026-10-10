@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, History, Lightbulb, Map as MapIcon, PencilLine, Play, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
+import { ClipboardPaste, ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, History, Lightbulb, Map as MapIcon, PencilLine, Play, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,8 @@ import { useMaterialData } from '@/hooks/useMaterialData';
 import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
 import { checkAnswer, instantiateTask, isParametric, taskProblems } from '@/lib/task-engine';
 import { checkEssayLLM, gradeEssayLocal, gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
+import { generateTasksForNodes } from '@/lib/task-gen';
+import { essayDuplicatesFeynman } from '@/lib/text-sim';
 import { computeSrsForNode, fmtDay, intervalFor, SRS_LADDER_DAYS, type SrsInfo } from '@/lib/srs';
 import type { Attempt, EssayGrade, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -30,6 +32,8 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
   const providers = useAppStore((s) => s.providers);
   const activeProvider = providers.find((p) => p.isActive) ?? null;
   const data = useMaterialData(activeMaterialId);
+  // генерация задач прямо из карточки «узел без задач» (одна кнопка, без редактора)
+  const [genBusy, setGenBusy] = useState(false);
 
   // живые данные узла
   const bundle = useLiveQuery(async () => {
@@ -81,6 +85,33 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
 
   const masteredNext = allDone && data.nextNode && data.nextNode.id !== nodeId ? data.nextNode : null;
 
+  /** Сгенерировать задачи прямо здесь, не открывая редактор */
+  const generateHere = async () => {
+    if (!activeProvider) {
+      toast.error('Для генерации задач нужен LLM-провайдер (Настройки)');
+      return;
+    }
+    setGenBusy(true);
+    try {
+      const r = await generateTasksForNodes(activeProvider, [node], { pauseMs: 0 });
+      if (r.generated > 0) {
+        toast.success(
+          r.brokenTasks > 0
+            ? `Задач добавлено: ${r.tasksAdded} · с ошибками: ${r.brokenTasks} — исправь в редакторе`
+            : `Задач добавлено: ${r.tasksAdded}`
+        );
+      } else if (r.skipped > 0) {
+        toast.info('У узла уже появились задачи');
+      } else {
+        toast.error('Не удалось сгенерировать задачи — попробуй ещё раз или добавь вручную');
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Ошибка генерации');
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-background flex flex-col">
       {/* Шапка */}
@@ -123,7 +154,7 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
           {/* Карточка идеи */}
           <IdeaCard node={node} />
 
-          {/* Непроходимый узел: генерация задач не удалась */}
+          {/* Непроходимый узел: задач нет — генерация одной кнопкой или редактор */}
           {tasks.length === 0 && (
             <Card className="border-amber-500/40 bg-amber-500/5">
               <CardContent className="flex flex-col gap-2 p-4">
@@ -131,12 +162,23 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
                   <Sparkles className="h-4 w-4" /> У узла нет задач — он непроходим
                 </p>
                 <p className="text-xs leading-snug text-muted-foreground">
-                  Похоже, генерация задач не удалась. Без задач узел нельзя завершить и перейти к следующим. Открой
-                  редактор: сгенерируй задачи заново или добавь вручную.
+                  Похоже, генерация задач не удалась. Без задач узел нельзя завершить и перейти к следующим. Сгенерируй
+                  задачи LLM или открой редактор и добавь вручную.
                 </p>
-                <Button variant="outline" size="sm" className="self-start" onClick={() => openNodeEditor(node.id)}>
-                  <PencilLine className="mr-1 h-4 w-4" /> Открыть редактор
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" onClick={() => void generateHere()} disabled={genBusy}>
+                    {genBusy ? (
+                      'Генерация…'
+                    ) : (
+                      <>
+                        <Sparkles className="mr-1 h-4 w-4" /> Сгенерировать задачи
+                      </>
+                    )}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => openNodeEditor(node.id)} disabled={genBusy}>
+                    <PencilLine className="mr-1 h-4 w-4" /> Редактор
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -179,6 +221,7 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
               node={node}
               attempt={latest.get(`task|${task.id}`)}
               provider={activeProvider}
+              feynmanAnswer={feynmanA?.userAnswer}
             />
           ))}
 
@@ -404,12 +447,15 @@ function TaskTrial({
   node,
   attempt,
   provider,
+  feynmanAnswer,
 }: {
   task: Task;
   index: number;
   node: IdeaNode;
   attempt?: Attempt;
   provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
+  /** Текст последней попытки Фейнмана — источник переноса в эссе-дубликат */
+  feynmanAnswer?: string;
 }) {
   // экземпляр пересобирается при изменении задачи (правка в редакторе) и по кнопке «другой вариант»
   const [roll, setRoll] = useState(0);
@@ -426,22 +472,46 @@ function TaskTrial({
     const idx = task.answerSpec.options.findIndex((o) => o === attempt.userAnswer);
     return idx >= 0 ? idx : undefined;
   }, [task, attempt]);
+  const isEssay = task.type === 'essay';
+  // эссе спрашивает то же, что и феймановский вопрос → ответ можно не писать заново
+  const dupOfFeynman = isEssay && !!feynmanAnswer && essayDuplicatesFeynman(task.prompt, node.feynmanQuestion);
   const { input, setInput, choiceIdx, setChoiceIdx } = useTaskAnswerDraft({
     nodeId: node.id,
     materialId: node.materialId,
     taskId: task.id,
     attemptAnswer: attempt?.userAnswer,
     attemptChoiceIdx,
+    // авто-перенос ответа Фейнмана в эссе, дублирующее его вопрос:
+    // поле пустое (нет черновика/попытки) → подставляем готовый текст
+    autoFillText:
+      isEssay && !broken && attempt?.verdict !== 'pass' && feynmanAnswer && feynmanAnswer.trim().length >= 10 && dupOfFeynman
+        ? feynmanAnswer
+        : undefined,
   });
 
   const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(attempt?.verdict === 'pass' ? 'pass' : null);
   const [correctShown, setCorrectShown] = useState<string | null>(null);
   const [hintLevel, setHintLevel] = useState(0);
   const [llmHints, setLlmHints] = useState<Record<number, string>>({});
-  const isEssay = task.type === 'essay';
   const [essayBusy, setEssayBusy] = useState(false);
   // свежий результат проверки открытого ответа (LLM/локальная рубрика)
   const [essayResult, setEssayResult] = useState<EssayGrade | null>(null);
+  // в поле — перенесённый ответ Фейнмана (показываем пояснение вместо кнопки переноса)
+  const transferred = isEssay && !!feynmanAnswer && input === feynmanAnswer;
+  // ручной перенос: с непустым полем — двухшагово (первый клик предупреждает о замене)
+  const [armReplace, setArmReplace] = useState(false);
+  const insertFeynman = () => {
+    if (!feynmanAnswer) return;
+    if (input.trim()) {
+      if (!armReplace) {
+        setArmReplace(true);
+        window.setTimeout(() => setArmReplace(false), 3500);
+        return;
+      }
+    }
+    setInput(feynmanAnswer);
+    setArmReplace(false);
+  };
   // восстановление последней проверки из попытки (переприход в узел)
   const essayFromAttempt = useMemo<EssayGrade | null>(() => {
     if (!isEssay || !attempt?.feedback) return null;
@@ -620,6 +690,24 @@ function TaskTrial({
               rows={5}
               className="resize-none"
             />
+            {transferred && !passed && (
+              <p className="text-[11px] leading-snug text-emerald-400/90">
+                Перенесено из объяснения Фейнмана: задача повторяет его вопрос почти дословно. Сократи, дополни — или
+                отправляй как есть.
+              </p>
+            )}
+            {!passed && !broken && feynmanAnswer && !transferred && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 self-start px-2 text-xs text-muted-foreground"
+                disabled={essayBusy}
+                onClick={insertFeynman}
+              >
+                <ClipboardPaste className="mr-1 h-3.5 w-3.5" />
+                {armReplace ? 'Ещё раз — заменит набранный ответ' : 'Вставить ответ Фейнмана'}
+              </Button>
+            )}
             {!passed && !broken && (
               <PhotoOcr
                 mode="full"
