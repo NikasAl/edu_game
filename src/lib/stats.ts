@@ -2,14 +2,15 @@
  * Статистика прохождения: агрегаты, активность по дням и прогноз освоения.
  *
  * Вся логика чистая (без обращения к БД) — проверяется node-тестом.
- * Зачёт узла повторяет правила computeNodeStates: фейнман pass + все задачи
- * pass (и хотя бы одна задача есть) + своя задача pass, причём каждая
- * попытка сравнивается с ПОСЛЕДНЕЙ попыткой этого испытания — провал после
- * зачёта снимает освоенность. Дата освоения узла = дата последнего из этих
- * зачётных «последних попыток» (момент, когда закрылась последняя дырка).
+ * Зачёт узла повторяет правила computeNodeStates с учётом режима сложности:
+ * фейнман pass + обязательные задачи pass (и хотя бы одна задача есть)
+ * + в «Полном» ещё и своя задача pass, причём каждая попытка сравнивается
+ * с ПОСЛЕДНЕЙ попыткой этого испытания — провал после зачёта снимает
+ * освоенность. Дата освоения узла = дата последнего из этих зачётных
+ * «последних попыток» (момент, когда закрылась последняя дырка).
  */
 import type { Attempt, IdeaEdge, IdeaNode, Region, Task } from './types';
-import { computeNodeStates } from './progress';
+import { computeNodeStates, isOwnRequired, isTaskRequired, type DifficultyMode } from './progress';
 
 export interface DayActivity {
   dayKey: string; // YYYY-MM-DD (локальная зона)
@@ -86,11 +87,16 @@ function addDays(d: Date, days: number): Date {
   return r;
 }
 
-export function computeStats(bundle: StatsBundle, windowDays = 28, now = new Date()): StatsResult {
+export function computeStats(
+  bundle: StatsBundle,
+  windowDays = 28,
+  now = new Date(),
+  difficulty: DifficultyMode = 'full'
+): StatsResult {
   const { nodes, edges, tasks, attempts } = bundle;
 
   // --- состояния узлов (статусы и освоенность) — те же правила, что в UI ---
-  const states = computeNodeStates({ nodes, edges, tasks, attempts });
+  const states = computeNodeStates({ nodes, edges, tasks, attempts, difficulty });
 
   // --- последняя попытка по испытанию (nodeId, kind, taskId) ---
   const latest = new Map<string, Attempt>();
@@ -118,8 +124,10 @@ export function computeStats(bundle: StatsBundle, windowDays = 28, now = new Dat
     const fey = latest.get(`${n.id}|feynman|`);
     const own = latest.get(`${n.id}|own|`);
     if (fey?.verdict === 'pass') dates.push(fey.createdAt);
-    if (own?.verdict === 'pass') dates.push(own.createdAt);
-    for (const t of nodeTasks) {
+    // в зачёт момента освоения идут только ОБЯЗАТЕЛЬНЫЕ испытания:
+    // добровольно пройденная «своя задача»/эссе не отодвигают дату
+    if (isOwnRequired(difficulty) && own?.verdict === 'pass') dates.push(own.createdAt);
+    for (const t of nodeTasks.filter((t) => isTaskRequired(t, difficulty))) {
       const a = latest.get(`${n.id}|task|${t.id}`);
       if (a?.verdict === 'pass') dates.push(a.createdAt);
     }

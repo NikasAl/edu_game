@@ -32,6 +32,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { exportAll, importAll, resetMaterialProgress, getMeta, setMeta } from '@/lib/db';
+import { DIFFICULTY_META, type DifficultyMode } from '@/lib/progress';
 import { isNativePlatform } from '@/lib/nativeHttp';
 import { saveJsonFile } from '@/lib/save-file';
 import {
@@ -55,6 +56,8 @@ export default function SettingsPanel() {
   const activateProvider = useAppStore((s) => s.activateProvider);
   const theme = useAppStore((s) => s.theme);
   const setTheme = useAppStore((s) => s.setTheme);
+  const difficulty = useAppStore((s) => s.difficulty);
+  const setDifficulty = useAppStore((s) => s.setDifficulty);
   const activeMaterialId = useAppStore((s) => s.activeMaterialId);
 
   const [dlgOpen, setDlgOpen] = useState(false);
@@ -405,6 +408,33 @@ export default function SettingsPanel() {
             })}
           </div>
         )}
+      </section>
+
+      {/* Режим сложности */}
+      <section>
+        <h2 className="mb-2 px-1 text-sm font-medium text-muted-foreground">Сложность</h2>
+        <Card>
+          <CardContent className="flex flex-col gap-2.5 p-4">
+            <div className="flex gap-1">
+              {(Object.keys(DIFFICULTY_META) as DifficultyMode[]).map((m) => (
+                <Button
+                  key={m}
+                  size="sm"
+                  className="flex-1"
+                  variant={difficulty === m ? 'default' : 'outline'}
+                  onClick={() => setDifficulty(m)}
+                >
+                  {DIFFICULTY_META[m].label}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs leading-snug text-muted-foreground">{DIFFICULTY_META[difficulty].hint}</p>
+            <p className="text-[11px] leading-snug text-muted-foreground/80">
+              Определяет, какие испытания обязательны для зачёта узла. Необязательные испытания остаются на экране —
+              их можно пройти в любой момент. Меняется и расписание повторений.
+            </p>
+          </CardContent>
+        </Card>
       </section>
 
       {/* Тема */}

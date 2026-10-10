@@ -236,10 +236,11 @@ export interface NodeState {
   missingHard: string[]; // id непокрытых hard-зависимостей
   missingSoft: string[];
   feynmanPassed: boolean;
-  tasksPassed: number; // сколько задач закрыто
-  tasksTotal: number;
+  tasksPassed: number; // сколько ОБЯЗАТЕЛЬНЫХ задач закрыто
+  tasksTotal: number; // обязательных задач (в «Лёгком» эссе не считаются)
   ownPassed: boolean;
-  trialsDone: number; // из 3
+  trialsTotal: number; // обязательных блоков испытаний (2–3, зависит от режима)
+  trialsDone: number; // закрыто блоков (из trialsTotal)
 }
 
 export interface NodeProgressRec {

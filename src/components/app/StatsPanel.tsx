@@ -24,6 +24,7 @@ import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { db } from '@/lib/db';
 import { computeStats, type DayActivity } from '@/lib/stats';
+import { useAppStore } from '@/store/useAppStore';
 import type { Material } from '@/lib/types';
 
 const SCOPES = [14, 28, 60] as const;
@@ -52,6 +53,7 @@ function depthOf(m: Material, byId: Map<string, Material>): number {
 }
 
 export default function StatsPanel() {
+  const difficulty = useAppStore((s) => s.difficulty);
   const [scope, setScope] = useState<string>(() => loadStoredScope());
   const [windowDays, setWindowDays] = useState<ScopeDays>(28);
 
@@ -84,7 +86,7 @@ export default function StatsPanel() {
       scopeRegions = regions.filter((r) => r.materialId === scope).sort((a, b) => a.orderIndex - b.orderIndex);
       title = materials.find((m) => m.id === scope)?.title ?? 'Карта';
     }
-    const stats = computeStats({ ...filtered, regions: scopeRegions }, windowDays);
+    const stats = computeStats({ ...filtered, regions: scopeRegions }, windowDays, new Date(), difficulty);
     const sortedMaterials = [...materials].sort(
       (a, b) =>
         depthOf(a, new Map(materials.map((m) => [m.id, m]))) - depthOf(b, new Map(materials.map((m) => [m.id, m]))) ||
@@ -92,7 +94,7 @@ export default function StatsPanel() {
         a.createdAt.getTime() - b.createdAt.getTime()
     );
     return { stats, materials: sortedMaterials, title };
-  }, [bundle, scope, windowDays]);
+  }, [bundle, scope, windowDays, difficulty]);
 
   if (!bundle || !view) {
     return <p className="pt-8 text-center text-sm text-muted-foreground">Загрузка…</p>;

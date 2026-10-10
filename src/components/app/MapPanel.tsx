@@ -62,6 +62,7 @@ type GameNodeData = {
   status: NodeState['status'];
   risky: boolean;
   trialsDone: number;
+  trialsTotal: number;
   regionColor: string;
   isNext: boolean;
   missingHardTitles: string[];
@@ -117,7 +118,7 @@ function GameMapNode({ data }: { data: GameNodeData }) {
       </div>
       <p className="mt-1 line-clamp-2 text-[13px] font-medium leading-snug">{data.title}</p>
       <div className="mt-1.5 flex items-center gap-1">
-        {[0, 1, 2].map((i) => (
+        {Array.from({ length: Math.min(Math.max(data.trialsTotal, 1), 3) }).map((_, i) => (
           <span
             key={i}
             className={`h-1.5 w-5 rounded-full ${
@@ -342,6 +343,7 @@ function MapPanelInner({ materialId }: { materialId: string }) {
           status: st.status,
           risky: st.risky,
           trialsDone: st.trialsDone,
+          trialsTotal: st.trialsTotal,
           regionColor: regionColor.get(n.regionId) ?? REGION_COLORS[0],
           isNext: data.nextNode?.id === n.id && st.status !== 'mastered',
           missingHardTitles: st.missingHard.map((id) => titleById.get(id) ?? '—'),

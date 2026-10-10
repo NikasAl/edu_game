@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import { db, getMeta, setMeta } from '@/lib/db';
+import { DIFFICULTY_META, type DifficultyMode } from '@/lib/progress';
 import type { IngestResult, LLMProvider, ProviderType, TabId } from '@/lib/types';
 
 export type Theme = 'light' | 'dark';
@@ -53,6 +54,10 @@ interface AppState {
   theme: Theme;
   setTheme: (t: Theme) => void;
 
+  // Режим сложности (какие испытания обязательны для зачёта узлов)
+  difficulty: DifficultyMode;
+  setDifficulty: (m: DifficultyMode) => void;
+
   // Провайдеры
   providers: LLMProvider[];
   loadProviders: () => Promise<void>;
@@ -102,6 +107,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       document.documentElement.classList.toggle('dark', t === 'dark');
       localStorage.setItem('edu-theme', t);
     }
+  },
+
+  // «Обычный» — рекомендуемый баланс нагрузки (своя задача — по желанию)
+  difficulty: 'normal',
+  setDifficulty: (m) => {
+    set({ difficulty: m });
+    if (typeof localStorage !== 'undefined') localStorage.setItem('edu-difficulty', m);
   },
 
   providers: [],
@@ -178,5 +190,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const savedTheme = (typeof localStorage !== 'undefined' ? localStorage.getItem('edu-theme') : null) as Theme | null;
     if (savedTheme === 'light' || savedTheme === 'dark') get().setTheme(savedTheme);
     else get().setTheme('dark');
+    const savedDifficulty = (typeof localStorage !== 'undefined' ? localStorage.getItem('edu-difficulty') : null) as DifficultyMode | null;
+    if (savedDifficulty && savedDifficulty in DIFFICULTY_META) get().setDifficulty(savedDifficulty);
   },
 }));

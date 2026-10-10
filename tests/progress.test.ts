@@ -324,3 +324,97 @@ describe('layoutGraph — слоёная раскладка', () => {
     expect(pos.get(a.id)!.x).not.toBe(pos.get(b.id)!.x);
   });
 });
+
+// ============ Режимы сложности ============
+
+describe('computeNodeStates — режимы сложности', () => {
+  it('Полный (по умолчанию и явно): без своей задачи узел не зачтён, испытаний 3', () => {
+    const n = mkNode();
+    const t = mkTask(n.id);
+    const attempts = [
+      mkAttempt(n.id, 'feynman', 'pass'),
+      mkAttempt(n.id, 'task', 'pass', t.id),
+    ];
+    for (const difficulty of ['full', undefined] as const) {
+      const states = computeNodeStates({ nodes: [n], edges: [], tasks: [t], attempts, difficulty });
+      const st = states.get(n.id)!;
+      expect(st.status).toBe('in_progress');
+      expect(st.trialsTotal).toBe(3);
+      expect(st.trialsDone).toBe(2);
+    }
+  });
+
+  it('Обычный: своя задача не обязательна — узел зачтён, испытаний 2', () => {
+    const n = mkNode();
+    const t = mkTask(n.id);
+    const attempts = [
+      mkAttempt(n.id, 'feynman', 'pass'),
+      mkAttempt(n.id, 'task', 'pass', t.id),
+      mkAttempt(n.id, 'own', 'fail'),
+    ];
+    const states = computeNodeStates({ nodes: [n], edges: [], tasks: [t], attempts, difficulty: 'normal' });
+    const st = states.get(n.id)!;
+    expect(st.status).toBe('mastered');
+    expect(st.trialsTotal).toBe(2);
+    expect(st.trialsDone).toBe(2); // добровольный провал своей задачи не перебивает
+  });
+
+  it('Лёгкий: непройденное эссе не блокирует, обычная задача — блокирует', () => {
+    const n = mkNode();
+    const essay: Task = {
+      ...mkTask(n.id, 'e1'),
+      type: 'essay',
+      answerSpec: { kind: 'essay', expectation: ['пункт'] },
+    };
+    const exact = mkTask(n.id, 'x1');
+    const attempts = [mkAttempt(n.id, 'feynman', 'pass'), mkAttempt(n.id, 'task', 'pass', exact.id)];
+    const states = computeNodeStates({
+      nodes: [n],
+      edges: [],
+      tasks: [essay, exact],
+      attempts,
+      difficulty: 'easy',
+    });
+    const st = states.get(n.id)!;
+    expect(st.status).toBe('mastered');
+    expect(st.tasksTotal).toBe(1); // только обязательные (эссе не считаются)
+  });
+
+  it('Лёгкий: узел только с эссе осваивается по Фейнману (задачи в узле есть)', () => {
+    const n = mkNode();
+    const essay: Task = {
+      ...mkTask(n.id, 'e1'),
+      type: 'essay',
+      answerSpec: { kind: 'essay', expectation: ['пункт'] },
+    };
+    const states = computeNodeStates({
+      nodes: [n],
+      edges: [],
+      tasks: [essay],
+      attempts: [mkAttempt(n.id, 'feynman', 'pass')],
+      difficulty: 'easy',
+    });
+    expect(states.get(n.id)!.status).toBe('mastered');
+    // …а в Обычном — нет: эссе обязательно
+    const normal = computeNodeStates({
+      nodes: [n],
+      edges: [],
+      tasks: [essay],
+      attempts: [mkAttempt(n.id, 'feynman', 'pass')],
+      difficulty: 'normal',
+    });
+    expect(normal.get(n.id)!.status).toBe('in_progress');
+  });
+
+  it('Узел без задач не осваивается ни в одном режиме', () => {
+    const n = mkNode();
+    const attempts = [
+      mkAttempt(n.id, 'feynman', 'pass'),
+      mkAttempt(n.id, 'own', 'pass'),
+    ];
+    for (const difficulty of ['easy', 'normal', 'full'] as const) {
+      const states = computeNodeStates({ nodes: [n], edges: [], tasks: [], attempts, difficulty });
+      expect(states.get(n.id)!.status).not.toBe('mastered');
+    }
+  });
+});

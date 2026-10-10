@@ -249,3 +249,63 @@ describe('dueReviews / nextUpcomingReview', () => {
     expect(dueReviews([n], [t], attempts, at(30))).toHaveLength(0);
   });
 });
+
+// ============ Режимы сложности ============
+
+describe('computeSrsForNode — режимы сложности', () => {
+  it('Обычный: без зачтённой своей задачи повторение доступно', () => {
+    const n = mkNode();
+    const t = mkTask(n.id);
+    const attempts = [
+      mkAttempt(n.id, 'feynman', 'pass', at(-10, 1)),
+      mkAttempt(n.id, 'task', 'pass', at(-10, 2), t.id),
+    ];
+    const info = computeSrsForNode(n, [t], attempts, at(0), 'normal');
+    expect(info).not.toBeNull();
+    expect(info!.masteredAt.getTime()).toBe(at(-10, 2).getTime());
+    expect(info!.due).toBe(true); // интервал 1 день давно прошёл
+  });
+
+  it('Полный (по умолчанию): без своей задачи повторения нет — прежнее правило', () => {
+    const n = mkNode();
+    const t = mkTask(n.id);
+    const attempts = [
+      mkAttempt(n.id, 'feynman', 'pass', at(-10, 1)),
+      mkAttempt(n.id, 'task', 'pass', at(-10, 2), t.id),
+    ];
+    expect(computeSrsForNode(n, [t], attempts, at(0))).toBeNull();
+    expect(computeSrsForNode(n, [t], attempts, at(0), 'full')).toBeNull();
+  });
+
+  it('Лёгкий: эссе не обязательно — узел с непройденным эссе повторяется', () => {
+    const n = mkNode();
+    const essay: Task = {
+      ...mkTask(n.id),
+      id: 'e1',
+      type: 'essay',
+      answerSpec: { kind: 'essay', expectation: ['пункт'] },
+    };
+    const exact: Task = { ...mkTask(n.id), id: 'x1' };
+    const attempts = [
+      mkAttempt(n.id, 'feynman', 'pass', at(-10, 1)),
+      mkAttempt(n.id, 'task', 'pass', at(-10, 2), exact.id),
+    ];
+    expect(computeSrsForNode(n, [essay, exact], attempts, at(0), 'easy')).not.toBeNull();
+    // в Обычном эссе обязательно — повторения нет
+    expect(computeSrsForNode(n, [essay, exact], attempts, at(0), 'normal')).toBeNull();
+  });
+
+  it('dueReviews/nextUpcomingReview принимают режим сложности', () => {
+    const n = mkNode();
+    const t = mkTask(n.id);
+    // освоен сегодня: интервал 1 день ещё не вышел → повторение «впереди»
+    const attempts = [
+      mkAttempt(n.id, 'feynman', 'pass', at(0, 1)),
+      mkAttempt(n.id, 'task', 'pass', at(0, 2), t.id),
+    ];
+    expect(dueReviews([n], [t], attempts, at(0, 3), 'normal')).toHaveLength(0);
+    expect(dueReviews([n], [t], attempts, at(0, 3), 'full')).toHaveLength(0);
+    expect(nextUpcomingReview([n], [t], attempts, at(0, 3), 'normal')).not.toBeNull();
+    expect(nextUpcomingReview([n], [t], attempts, at(0, 3), 'full')).toBeNull();
+  });
+});

@@ -11,6 +11,40 @@ import type {
   Task,
 } from './types';
 
+// ============ Режимы сложности ============
+
+/**
+ * Режим определяет, какие испытания ОБЯЗАТЕЛЬНЫ для зачёта узла.
+ * Необязательные испытания остаются доступны (проходятся добровольно),
+ * но не блокируют освоение и переход к следующим узлам.
+ */
+export type DifficultyMode = 'easy' | 'normal' | 'full';
+
+export const DIFFICULTY_META: Record<DifficultyMode, { label: string; hint: string }> = {
+  easy: {
+    label: 'Лёгкий',
+    hint: 'Фейнман + задачи с коротким ответом. Эссе и своя задача — по желанию.',
+  },
+  normal: {
+    label: 'Обычный',
+    hint: 'Фейнман + все задачи узла. Своя задача — по желанию.',
+  },
+  full: {
+    label: 'Полный',
+    hint: 'Полный метод: Фейнман + все задачи + своя задача.',
+  },
+};
+
+/** Задача обязательна для зачёта узла? В «Лёгком» эссе не обязательны. */
+export function isTaskRequired(t: Task, mode: DifficultyMode): boolean {
+  return !(mode === 'easy' && t.type === 'essay');
+}
+
+/** «Своя задача» обязательна только в «Полном» режиме. */
+export function isOwnRequired(mode: DifficultyMode): boolean {
+  return mode === 'full';
+}
+
 /** Матрица смежности: deps[nodeId] = [{ id, kind }] — от чего зависит узел */
 function buildDeps(edges: IdeaEdge[]): Map<string, { id: string; kind: 'hard' | 'soft' }[]> {
   const deps = new Map<string, { id: string; kind: 'hard' | 'soft' }[]>();
@@ -27,14 +61,18 @@ export interface ComputeInput {
   edges: IdeaEdge[];
   tasks: Task[];
   attempts: Attempt[];
+  /** Режим сложности (по умолчанию «Полный» — прежнее поведение) */
+  difficulty?: DifficultyMode;
 }
 
 /**
  * Вычислить состояние всех узлов по попыткам.
- * Зачёт узла = фейнман пройден + все задачи узла пройдены + своя задача пройдена.
+ * Зачёт узла = фейнман пройден + обязательные задачи пройдены + (в «Полном»)
+ * своя задача пройдена. Узел без задач освоить нельзя в любом режиме.
  */
 export function computeNodeStates(input: ComputeInput): Map<string, NodeState> {
   const { nodes, edges, tasks, attempts } = input;
+  const difficulty = input.difficulty ?? 'full';
   const deps = buildDeps(edges);
 
   // Последняя попытка по ключу (nodeId, kind, taskId)
@@ -56,16 +94,20 @@ export function computeNodeStates(input: ComputeInput): Map<string, NodeState> {
   const states = new Map<string, NodeState>();
 
   // Первый проход: какие узлы зачтены (по попыткам, без учёта графа)
+  const ownRequired = isOwnRequired(difficulty);
   for (const n of nodes) {
     const feynmanPassed = latest.get(`${n.id}|feynman|`)?.verdict === 'pass';
     const ownPassed = latest.get(`${n.id}|own|`)?.verdict === 'pass';
     const nodeTasks = tasksByNode.get(n.id) ?? [];
+    // обязательные задачи: в «Лёгком» эссе исключены (но сам узел с задачами)
+    const requiredTasks = nodeTasks.filter((t) => isTaskRequired(t, difficulty));
     let tasksPassed = 0;
-    for (const t of nodeTasks) {
+    for (const t of requiredTasks) {
       if (latest.get(`${n.id}|task|${t.id}`)?.verdict === 'pass') tasksPassed++;
     }
+    const tasksBlockPassed = nodeTasks.length > 0 && tasksPassed === requiredTasks.length;
     const allTrialsPassed =
-      feynmanPassed && ownPassed && nodeTasks.length > 0 && tasksPassed === nodeTasks.length;
+      feynmanPassed && (ownPassed || !ownRequired) && tasksBlockPassed;
     if (allTrialsPassed) mastered.add(n.id);
     states.set(n.id, {
       status: 'available',
@@ -74,9 +116,13 @@ export function computeNodeStates(input: ComputeInput): Map<string, NodeState> {
       missingSoft: [],
       feynmanPassed,
       tasksPassed,
-      tasksTotal: nodeTasks.length,
+      tasksTotal: requiredTasks.length,
       ownPassed,
-      trialsDone: (feynmanPassed ? 1 : 0) + (tasksPassed === nodeTasks.length && nodeTasks.length > 0 ? 1 : 0) + (ownPassed ? 1 : 0),
+      trialsTotal: 1 + (nodeTasks.length > 0 ? 1 : 0) + (ownRequired ? 1 : 0),
+      trialsDone: Math.min(
+        (feynmanPassed ? 1 : 0) + (tasksBlockPassed ? 1 : 0) + (ownPassed ? 1 : 0),
+        1 + (nodeTasks.length > 0 ? 1 : 0) + (ownRequired ? 1 : 0)
+      ),
     });
   }
 

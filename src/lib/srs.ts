@@ -16,6 +16,7 @@
  * Лестница интервалов (дней): 1 → 3 → 7 → 16 → 35 → 70, дальше не растёт.
  */
 import type { Attempt, IdeaNode, Task } from './types';
+import { isOwnRequired, isTaskRequired, type DifficultyMode } from './progress';
 
 export const SRS_LADDER_DAYS = [1, 3, 7, 16, 35, 70];
 
@@ -54,7 +55,8 @@ export function computeSrsForNode(
   node: IdeaNode,
   tasks: Task[],
   attempts: Attempt[],
-  now: Date
+  now: Date,
+  difficulty: DifficultyMode = 'full'
 ): SrsInfo | null {
   const nodeTasks = tasks.filter((t) => t.nodeId === node.id);
   if (nodeTasks.length === 0) return null;
@@ -68,10 +70,14 @@ export function computeSrsForNode(
 
   const feynman = latest.get('feynman|');
   const own = latest.get('own|');
-  if (feynman?.verdict !== 'pass' || own?.verdict !== 'pass') return null;
+  // правила зачёта — как в computeNodeStates: своя задача и эссе обязательны
+  // только в соответствующих режимах сложности
+  if (feynman?.verdict !== 'pass') return null;
+  if (isOwnRequired(difficulty) && own?.verdict !== 'pass') return null;
 
-  const passingDates: Date[] = [feynman.createdAt, own.createdAt];
-  for (const t of nodeTasks) {
+  const passingDates: Date[] = [feynman.createdAt];
+  if (own?.verdict === 'pass') passingDates.push(own.createdAt);
+  for (const t of nodeTasks.filter((t) => isTaskRequired(t, difficulty))) {
     const a = latest.get(`task|${t.id}`);
     if (a?.verdict !== 'pass') return null;
     passingDates.push(a.createdAt);
@@ -107,11 +113,12 @@ export function dueReviews(
   nodes: IdeaNode[],
   tasks: Task[],
   attempts: Attempt[],
-  now: Date
+  now: Date,
+  difficulty: DifficultyMode = 'full'
 ): { node: IdeaNode; info: SrsInfo }[] {
   const out: { node: IdeaNode; info: SrsInfo }[] = [];
   for (const n of nodes) {
-    const info = computeSrsForNode(n, tasks, attempts, now);
+    const info = computeSrsForNode(n, tasks, attempts, now, difficulty);
     if (info?.due) out.push({ node: n, info });
   }
   out.sort(
@@ -126,11 +133,12 @@ export function nextUpcomingReview(
   nodes: IdeaNode[],
   tasks: Task[],
   attempts: Attempt[],
-  now: Date
+  now: Date,
+  difficulty: DifficultyMode = 'full'
 ): { node: IdeaNode; info: SrsInfo } | null {
   let best: { node: IdeaNode; info: SrsInfo } | null = null;
   for (const n of nodes) {
-    const info = computeSrsForNode(n, tasks, attempts, now);
+    const info = computeSrsForNode(n, tasks, attempts, now, difficulty);
     if (!info || info.due) continue;
     if (!best || info.dueAt.getTime() < best.info.dueAt.getTime()) best = { node: n, info };
   }

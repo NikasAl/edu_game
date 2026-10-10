@@ -17,10 +17,12 @@ import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
 import { checkAnswer, instantiateTask, isParametric, taskProblems } from '@/lib/task-engine';
+import { isOwnRequired, isTaskRequired } from '@/lib/progress';
 import { checkEssayLLM, gradeEssayLocal, gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
 import { generateTasksForNodes } from '@/lib/task-gen';
 import { essayDuplicatesFeynman } from '@/lib/text-sim';
 import { computeSrsForNode, fmtDay, intervalFor, SRS_LADDER_DAYS, type SrsInfo } from '@/lib/srs';
+import { AnswerHelpers, appendChunk } from '@/components/app/AnswerHelpers';
 import type { Attempt, EssayGrade, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -30,6 +32,7 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
   const openNodeEditor = useAppStore((s) => s.openNodeEditor);
   const activeMaterialId = useAppStore((s) => s.activeMaterialId);
   const providers = useAppStore((s) => s.providers);
+  const difficulty = useAppStore((s) => s.difficulty);
   const activeProvider = providers.find((p) => p.isActive) ?? null;
   const data = useMaterialData(activeMaterialId);
   // генерация задач прямо из карточки «узел без задач» (одна кнопка, без редактора)
@@ -61,8 +64,8 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
   // SRS: расписание повторения освоенного узла (null — узел не освоен/не освоиваем)
   const now = useMemo(() => new Date(), [nodeId]);
   const srsInfo = useMemo(
-    () => (bundle?.node ? computeSrsForNode(bundle.node, bundle.tasks, bundle.attempts, now) : null),
-    [bundle, now]
+    () => (bundle?.node ? computeSrsForNode(bundle.node, bundle.tasks, bundle.attempts, now, difficulty) : null),
+    [bundle, now, difficulty]
   );
 
   if (!bundle?.node || !data.ready) {
@@ -79,9 +82,15 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
   const st = data.states.get(nodeId);
   const feynmanA = latest.get('feynman|');
   const ownA = latest.get('own|');
-  const tasksPassed = tasks.filter((t) => latest.get(`task|${t.id}`)?.verdict === 'pass').length;
+  // гейт режима сложности: какие испытания обязательны для зачёта
+  const ownRequired = isOwnRequired(difficulty);
+  const requiredTasks = tasks.filter((t) => isTaskRequired(t, difficulty));
+  const requiredPassed = requiredTasks.filter((t) => latest.get(`task|${t.id}`)?.verdict === 'pass').length;
   const allDone =
-    feynmanA?.verdict === 'pass' && ownA?.verdict === 'pass' && tasks.length > 0 && tasksPassed === tasks.length;
+    feynmanA?.verdict === 'pass' &&
+    (ownA?.verdict === 'pass' || !ownRequired) &&
+    tasks.length > 0 &&
+    requiredPassed === requiredTasks.length;
 
   const masteredNext = allDone && data.nextNode && data.nextNode.id !== nodeId ? data.nextNode : null;
 
@@ -128,11 +137,14 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
             <PencilLine className="h-5 w-5" />
           </Button>
         </div>
-        {/* Чипы испытаний */}
+        {/* Чипы испытаний: обязательные — как раньше, необязательные — пунктиром */}
         <div className="mx-auto flex max-w-lg gap-1.5 px-4 pb-2.5">
           <TrialChip label="Фейнман" done={feynmanA?.verdict === 'pass'} />
-          <TrialChip label={`Задачи ${tasksPassed}/${tasks.length}`} done={tasks.length > 0 && tasksPassed === tasks.length} />
-          <TrialChip label="Своя задача" done={ownA?.verdict === 'pass'} />
+          <TrialChip
+            label={`Задачи ${requiredPassed}/${requiredTasks.length}`}
+            done={tasks.length > 0 && requiredPassed === requiredTasks.length}
+          />
+          <TrialChip label="Своя задача" done={ownA?.verdict === 'pass'} optional={!ownRequired} />
         </div>
       </header>
 
@@ -190,7 +202,8 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
                 <Trophy className="h-9 w-9 text-emerald-400" />
                 <p className="font-semibold">Узел освоен!</p>
                 <p className="text-sm text-muted-foreground">
-                  Все три испытания пройдены. Прогресс сохранён — карта обновилась.
+                  {ownRequired ? 'Все три испытания пройдены' : 'Все обязательные испытания пройдены'}. Прогресс
+                  сохранён — карта обновилась.
                 </p>
                 <div className="mt-1 flex gap-2">
                   <Button variant="outline" size="sm" onClick={closeNode}>
@@ -222,11 +235,12 @@ export default function NodeView({ nodeId }: { nodeId: string }) {
               attempt={latest.get(`task|${task.id}`)}
               provider={activeProvider}
               feynmanAnswer={feynmanA?.userAnswer}
+              essayOptional={difficulty === 'easy' && task.type === 'essay'}
             />
           ))}
 
           {/* Испытание 3: Своя задача */}
-          <OwnTaskTrial key={`o:${nodeId}`} node={node} attempt={ownA} provider={activeProvider} />
+          <OwnTaskTrial key={`o:${nodeId}`} node={node} attempt={ownA} provider={activeProvider} optional={!ownRequired} />
         </div>
       </div>
     </div>
@@ -238,16 +252,21 @@ function titleList(data: ReturnType<typeof useMaterialData>, ids: string[]): str
   return ids.map((id) => byId.get(id) ?? '—').join(', ');
 }
 
-function TrialChip({ label, done }: { label: string; done: boolean }) {
+function TrialChip({ label, done, optional }: { label: string; done: boolean; optional?: boolean }) {
   return (
     <span
       className={cn(
         'flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px]',
-        done ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400' : 'border-border bg-muted/40 text-muted-foreground'
+        done
+          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+          : optional
+            ? 'border-dashed border-border bg-transparent text-muted-foreground/70'
+            : 'border-border bg-muted/40 text-muted-foreground'
       )}
     >
       {done && <CheckCircle2 className="h-3 w-3" />}
       {label}
+      {optional && !done && <span className="opacity-70">· по желанию</span>}
     </span>
   );
 }
@@ -382,6 +401,11 @@ function FeynmanTrial({
           className="resize-none"
           disabled={busy}
         />
+        <AnswerHelpers
+          variant="feynman"
+          onAppend={(chunk) => setText((prev) => appendChunk(prev ?? '', chunk))}
+          disabled={busy || passed}
+        />
         <PhotoOcr
           mode="full"
           label="Фото с решением"
@@ -448,6 +472,7 @@ function TaskTrial({
   attempt,
   provider,
   feynmanAnswer,
+  essayOptional,
 }: {
   task: Task;
   index: number;
@@ -456,6 +481,8 @@ function TaskTrial({
   provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
   /** Текст последней попытки Фейнмана — источник переноса в эссе-дубликат */
   feynmanAnswer?: string;
+  /** Режим «Лёгкий»: эссе не обязательны для зачёта узла */
+  essayOptional?: boolean;
 }) {
   // экземпляр пересобирается при изменении задачи (правка в редакторе) и по кнопке «другой вариант»
   const [roll, setRoll] = useState(0);
@@ -690,6 +717,19 @@ function TaskTrial({
               rows={5}
               className="resize-none"
             />
+            {!passed && !broken && (
+              <AnswerHelpers
+                variant="essay"
+                onAppend={(chunk) => setInput((prev) => appendChunk(prev ?? '', chunk))}
+                disabled={essayBusy}
+              />
+            )}
+            {essayOptional && !passed && !broken && (
+              <p className="rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px] leading-snug text-muted-foreground">
+                Режим «Лёгкий»: это эссе не обязательно для зачёта узла — можно ответить, а можно перейти к следующей
+                идее.
+              </p>
+            )}
             {transferred && !passed && (
               <p className="text-[11px] leading-snug text-emerald-400/90">
                 Перенесено из объяснения Фейнмана: задача повторяет его вопрос почти дословно. Сократи, дополни — или
@@ -819,10 +859,13 @@ function OwnTaskTrial({
   node,
   attempt,
   provider,
+  optional,
 }: {
   node: IdeaNode;
   attempt?: Attempt;
   provider: ReturnType<typeof useAppStore.getState>['providers'][number] | null;
+  /** Режимы «Лёгкий»/«Обычный»: своя задача не обязательна для зачёта */
+  optional?: boolean;
 }) {
   // черновик своей задачи: сохраняется даже без отправки на проверку
   const [text, setText] = useNodeDraft({
@@ -876,6 +919,7 @@ function OwnTaskTrial({
         />
         <p className="text-sm leading-snug text-muted-foreground">
           Придумай задачу на идею «{node.title}»: что дано и что найти. Чужая формулировка своими словами — лучший тест понимания.
+          {optional && ' В текущем режиме это испытание по желанию.'}
         </p>
         <Textarea
           placeholder="Например: «Велосипедист едет по закону s(t)=4t². Найти его скорость через 5 секунд…»"
@@ -884,6 +928,11 @@ function OwnTaskTrial({
           rows={4}
           className="resize-none"
           disabled={busy}
+        />
+        <AnswerHelpers
+          variant="own"
+          onAppend={(chunk) => setText((prev) => appendChunk(prev ?? '', chunk))}
+          disabled={busy || passed}
         />
         <PhotoOcr
           mode="full"
@@ -961,12 +1010,16 @@ function ReviewCard({
   // уже учтёт зачёт — считать от него было бы двойным увеличением)
   const [passNextDays, setPassNextDays] = useState<number | null>(null);
 
-  // Пул задач для проверки памяти: не битые; choice не предпочитаем — правильный
-  // вариант виден выше в зачтённой задаче
+  // Пул задач для проверки памяти: не битые; предпочтение — коротким
+  // объективным форматам (exact/numeric/code), затем choice (правильный
+  // вариант виден выше в зачтённой задаче), эссе — только если в узле нет
+  // ничего другого: переписывать текст на повторении слишком дорого
   const pool = useMemo(() => {
     const ok = tasks.filter((t) => taskProblems(t).length === 0);
-    const pref = ok.filter((t) => t.type !== 'choice');
-    return (pref.length > 0 ? pref : ok).map((t) => t.id);
+    const objective = ok.filter((t) => t.type !== 'essay');
+    const shortAnswer = objective.filter((t) => t.type !== 'choice');
+    const preferred = shortAnswer.length > 0 ? shortAnswer : objective.length > 0 ? objective : ok;
+    return preferred.map((t) => t.id);
   }, [tasks]);
 
   const reviewTask = tasks.find((t) => t.id === reviewTaskId) ?? null;
@@ -1106,14 +1159,23 @@ function ReviewCard({
                 ))}
               </div>
             ) : isEssay ? (
-              <Textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                disabled={busy || verdict !== null}
-                placeholder="Краткий ответ своими словами…"
-                rows={4}
-                className="resize-none"
-              />
+              <div className="flex flex-col gap-2">
+                <Textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  disabled={busy || verdict !== null}
+                  placeholder="Краткий ответ своими словами…"
+                  rows={4}
+                  className="resize-none"
+                />
+                {verdict === null && (
+                  <AnswerHelpers
+                    variant="review"
+                    onAppend={(chunk) => setInput((prev) => appendChunk(prev ?? '', chunk))}
+                    disabled={busy}
+                  />
+                )}
+              </div>
             ) : (
               <input
                 value={input}

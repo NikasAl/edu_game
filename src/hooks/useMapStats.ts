@@ -9,6 +9,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useMemo } from 'react';
 import { db } from '@/lib/db';
 import { computeNodeStates } from '@/lib/progress';
+import { useAppStore } from '@/store/useAppStore';
 import type { Material } from '@/lib/types';
 
 export interface MapStats {
@@ -26,6 +27,7 @@ export interface UseMapStatsResult {
 }
 
 export function useMapStats(): UseMapStatsResult {
+  const difficulty = useAppStore((s) => s.difficulty);
   const bundle = useLiveQuery(async () => {
     const [materials, nodes, edges, tasks, attempts] = await Promise.all([
       db.materials.toArray(),
@@ -78,6 +80,7 @@ export function useMapStats(): UseMapStatsResult {
         edges: edgesByMat.get(m.id) ?? [],
         tasks: tasksByMat.get(m.id) ?? [],
         attempts: attemptsByMat.get(m.id) ?? [],
+        difficulty,
       });
       const directMastered = mn.filter((n) => states.get(n.id)?.status === 'mastered').length;
       let s: MapStats = {
@@ -105,5 +108,5 @@ export function useMapStats(): UseMapStatsResult {
     for (const m of materials) if (!visited.has(m.id)) fill(m);
 
     return { ready: true, materials, stats };
-  }, [bundle]);
+  }, [bundle, difficulty]);
 }

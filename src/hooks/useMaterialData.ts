@@ -4,6 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useMemo } from 'react';
 import { db } from '@/lib/db';
 import { computeNodeStates, computeDepths, recommendNext } from '@/lib/progress';
+import { useAppStore } from '@/store/useAppStore';
 import type { IdeaNode, NodeState } from '@/lib/types';
 
 /**
@@ -11,6 +12,7 @@ import type { IdeaNode, NodeState } from '@/lib/types';
  * вычисленные состояния и рекомендация следующего узла.
  */
 export function useMaterialData(materialId: string | null) {
+  const difficulty = useAppStore((s) => s.difficulty);
   const bundle = useLiveQuery(async () => {
     if (!materialId) return null;
     const [nodes, edges, tasks, attempts, regions, material] = await Promise.all([
@@ -30,9 +32,9 @@ export function useMaterialData(materialId: string | null) {
       return { ready: false as const, nodes: [] as IdeaNode[], regions: [], material: null, states: new Map<string, NodeState>(), depths: new Map<string, number>(), nextNode: null, tasks: [], edges: [], attempts: [] };
     }
     const { nodes, edges, tasks, attempts, regions, material } = bundle;
-    const states = computeNodeStates({ nodes, edges, tasks, attempts });
+    const states = computeNodeStates({ nodes, edges, tasks, attempts, difficulty });
     const depths = computeDepths(nodes, edges);
     const nextNode = recommendNext(nodes, states, depths);
     return { ready: true as const, nodes, regions, material, states, depths, nextNode, tasks, edges, attempts };
-  }, [bundle]);
+  }, [bundle, difficulty]);
 }

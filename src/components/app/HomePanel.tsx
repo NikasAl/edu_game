@@ -29,6 +29,7 @@ export default function HomePanel() {
   const setActiveMaterialId = useAppStore((s) => s.setActiveMaterialId);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const openNode = useAppStore((s) => s.openNode);
+  const difficulty = useAppStore((s) => s.difficulty);
   const data = useMaterialData(activeMaterialId);
   const { ready: statsReady, materials, stats } = useMapStats();
   const [lastNodeId, setLastNodeId] = useState<string | null>(null);
@@ -51,12 +52,12 @@ export default function HomePanel() {
   // Хуки до раннего return загрузки — data в этом случае отдаёт пустые массивы.
   const srsNow = useMemo(() => new Date(), [data.ready]);
   const srsDue = useMemo(
-    () => dueReviews(data.nodes, data.tasks, data.attempts, srsNow),
-    [data.nodes, data.tasks, data.attempts, srsNow]
+    () => dueReviews(data.nodes, data.tasks, data.attempts, srsNow, difficulty),
+    [data.nodes, data.tasks, data.attempts, srsNow, difficulty]
   );
   const srsUpcoming = useMemo(
-    () => nextUpcomingReview(data.nodes, data.tasks, data.attempts, srsNow),
-    [data.nodes, data.tasks, data.attempts, srsNow]
+    () => nextUpcomingReview(data.nodes, data.tasks, data.attempts, srsNow, difficulty),
+    [data.nodes, data.tasks, data.attempts, srsNow, difficulty]
   );
 
   if (!data.ready || !statsReady) {
