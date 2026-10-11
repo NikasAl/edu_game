@@ -43,6 +43,10 @@ import {
 } from '@/lib/llm-ops';
 import { hasCycle } from '@/lib/progress';
 import { normalizeText } from '@/lib/safeMath';
+import {
+  linkNodesToSavedText,
+  saveSourceText,
+} from '@/lib/saved-texts';
 import { getPathToRoot, nextOrderIndex } from '@/lib/maps';
 import {
   djvuPageSpans,
@@ -59,13 +63,24 @@ import {
   type OpenedPdf,
 } from '@/lib/extract';
 import { enrichGraph } from '@/lib/graph-db';
-import type { EdgeKind, IdeaEdge, IdeaNode, LLMProvider, Material, Region, Task } from '@/lib/types';
+import type {
+  EdgeKind,
+  IdeaEdge,
+  IdeaNode,
+  ImportSourceMode,
+  LLMProvider,
+  Material,
+  Region,
+  SavedText,
+  Task,
+} from '@/lib/types';
 import { normalizeAtomKind } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 import AutoAdvanceBanner from './AutoAdvanceBanner';
+import SavedTextsList from './SavedTextsList';
 
 type Phase = 'input' | 'extract' | 'pdfOcr' | 'parsing' | 'review' | 'tasks';
-type SourceMode = 'paste' | 'url' | 'pdf' | 'djvu';
+type SourceMode = ImportSourceMode;
 
 /** Диапазон страниц документа для OCR-режима */
 type OcrSpan = { id: string; title: string; from: number; to: number };
@@ -146,6 +161,9 @@ export default function ImportPanel() {
   const ingestSourceText = useAppStore((s) => s.ingestSourceText);
   const setIngestDraft = useAppStore((s) => s.setIngestDraft);
   const setIngestResult = useAppStore((s) => s.setIngestResult);
+  const ingestSourceLabel = useAppStore((s) => s.ingestSourceLabel);
+  const ingestSourceMode = useAppStore((s) => s.ingestSourceMode);
+  const setIngestSource = useAppStore((s) => s.setIngestSource);
   const setActiveMaterialId = useAppStore((s) => s.setActiveMaterialId);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
 
@@ -177,6 +195,8 @@ export default function ImportPanel() {
   const [previewPage, setPreviewPage] = useState<number | null>(null);
   const [ocrNumPages, setOcrNumPages] = useState(0);
   const [ocrSource, setOcrSource] = useState('');
+  /** Документ какого типа открыт в OCR-фазе (для подписи источника в библиотеке текстов) */
+  const [ocrDocMode, setOcrDocMode] = useState<ImportSourceMode>('pdf');
   const [ocrBusy, setOcrBusy] = useState(false);
   /** Открытый документ (PDF или DjVu) — держится ради destroy */
   const ocrDocRef = useRef<OcrDocAdapter | null>(null);
@@ -210,6 +230,7 @@ export default function ImportPanel() {
   // фаза выбора секций (URL/PDF)
   const [extractTitle, setExtractTitle] = useState('');
   const [extractSource, setExtractSource] = useState('');
+  const [extractMode, setExtractMode] = useState<ImportSourceMode>('paste');
   const [sections, setSections] = useState<ExtractedSection[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [openSectionId, setOpenSectionId] = useState<string | null>(null);
@@ -221,6 +242,8 @@ export default function ImportPanel() {
 
   const parseBusyRef = useRef(false); // защита от двойного запуска (кнопка + автопереход)
   const saveBusyRef = useRef(false); // защита от двойного сохранения (кнопка + автопереход)
+  /** Текст из библиотеки, связанный с текущим разбором (для связей идей при сохранении карты) */
+  const savedTextIdRef = useRef<string | null>(null);
 
   /**
    * Разбор текста на атомы. titleArg/textArg — явная подмена значений из стора:
@@ -246,6 +269,24 @@ export default function ImportPanel() {
     parseBusyRef.current = true;
     setPhase('parsing');
     setProgressMsg('Разбираю текст на атомы идей…');
+    setProgressVal(5);
+    // Автосохранение в библиотеку — ДО разбора: даже если разбор упадёт,
+    // удачный текст из источника останется доступным для повторной попытки.
+    // Повторный разбор того же текста дедуплицируется (дублей не появляется).
+    let textSaved = false;
+    try {
+      const saved = await saveSourceText({
+        title,
+        text,
+        sourceLabel: ingestSourceLabel || 'Вставленный текст',
+        mode: ingestSourceLabel ? ingestSourceMode : 'paste',
+        groupName: ingestSourceLabel || title,
+      });
+      savedTextIdRef.current = saved.id;
+      textSaved = true;
+    } catch {
+      // библиотека не критична — разбор продолжается
+    }
     setProgressVal(10);
     try {
       const result = await ingestSplitIntoIdeasChunked(
@@ -270,6 +311,9 @@ export default function ImportPanel() {
       toast.success(`Готово: ${check.message}. Проверь и сохрани.`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось разобрать материал');
+      if (textSaved) {
+        toast.info('Текст остался в «Сохранённых текстах» ниже — разбор можно повторить позже');
+      }
       setPhase('input');
     } finally {
       parseBusyRef.current = false;
@@ -280,13 +324,18 @@ export default function ImportPanel() {
 
   // ============ Извлечение из URL / PDF ============
 
-  const openExtract = (res: { title: string; sections: ExtractedSection[]; warning?: string; viaReader?: boolean }, sourceLabel: string) => {
+  const openExtract = (
+    res: { title: string; sections: ExtractedSection[]; warning?: string; viaReader?: boolean },
+    sourceLabel: string,
+    mode: ImportSourceMode
+  ) => {
     if (res.sections.length === 0) {
       toast.error('Не удалось извлечь текст: нет подходящих разделов');
       return;
     }
     setExtractTitle(res.title || '');
     setExtractSource(sourceLabel);
+    setExtractMode(mode);
     setSections(res.sections);
     setSelectedIds(new Set(res.sections.map((s) => s.id)));
     setOpenSectionId(res.sections.length === 1 ? res.sections[0].id : null);
@@ -303,7 +352,7 @@ export default function ImportPanel() {
     setUrlBusy(true);
     try {
       const res = await extractFromUrl(urlValue.trim());
-      openExtract(res, urlValue.trim());
+      openExtract(res, urlValue.trim(), 'url');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось загрузить страницу');
     } finally {
@@ -318,6 +367,7 @@ export default function ImportPanel() {
       if (pdfOcrMode) {
         // LLM OCR: открыть документ, показать диапазоны страниц для выбора
         setProgressMsg('Открываю PDF…');
+        setOcrDocMode('pdf');
         const opened = await openPdf(buf);
         ocrDocRef.current = makePdfOcrAdapter(opened);
         setOcrDoc(ocrDocRef.current);
@@ -335,7 +385,7 @@ export default function ImportPanel() {
       } else {
         setProgressMsg('Читаю PDF…');
         const res = await extractFromPdf(buf, file.name, setProgressMsg);
-        openExtract(res, file.name);
+        openExtract(res, file.name, 'pdf');
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось разобрать PDF');
@@ -357,6 +407,7 @@ export default function ImportPanel() {
       if (djvuOcrMode) {
         // LLM OCR: открыть документ, показать диапазоны страниц для выбора
         setProgressMsg('Открываю DjVu…');
+        setOcrDocMode('djvu');
         const opened = await openDjvu(buf);
         ocrDocRef.current = makeDjvuOcrAdapter(opened);
         setOcrDoc(ocrDocRef.current);
@@ -374,7 +425,7 @@ export default function ImportPanel() {
       } else {
         setProgressMsg('Читаю DjVu…');
         const res = await extractFromDjvu(buf, file.name, setProgressMsg);
-        openExtract(res, file.name);
+        openExtract(res, file.name, 'djvu');
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Не удалось разобрать DjVu');
@@ -503,7 +554,8 @@ export default function ImportPanel() {
               ? 'Распознавание прервано — применены уже распознанные разделы'
               : undefined,
           },
-          `${ocrSource} · LLM OCR`
+          `${ocrSource} · LLM OCR`,
+          ocrDocMode
         );
         setPhase('extract');
       }
@@ -536,6 +588,7 @@ export default function ImportPanel() {
       return;
     }
     setIngestDraft(extractTitle.trim() || ingestTitle, text);
+    setIngestSource(extractSource, extractMode);
     setSourceMode('paste');
     setPhase('input');
     toast.success(
@@ -569,6 +622,7 @@ export default function ImportPanel() {
       return false;
     }
     setIngestDraft(title, text);
+    setIngestSource(extractSource, extractMode);
     setSourceMode('paste');
     toast.info(`Разделы применены (${selectedSections.length}) — разбираю на атомы`);
     void runParse(title, text);
@@ -638,6 +692,16 @@ export default function ImportPanel() {
       await db.nodes.bulkPut(nodes);
       await db.edges.bulkPut(edges);
 
+      // Связать идеи с местами в сохранённом тексте (библиотека импорта):
+      // узлы получают savedTextId, а где нашлась цитата sourceRef — и sourceChar.
+      if (savedTextIdRef.current) {
+        try {
+          await linkNodesToSavedText(materialId, savedTextIdRef.current, ingestSourceText.trim());
+        } catch {
+          // связь с текстом не критична — карта сохранится и без неё
+        }
+      }
+
       // ИИ-проход графа: добираем межфрагментные связи, которых не видит
       // split_into_ideas (рёбра needs строятся только внутри фрагмента).
       // Не критичен: при сбое остаются рёбра из needs.
@@ -685,6 +749,8 @@ export default function ImportPanel() {
       await setActiveMaterialId(materialId);
       setIngestResult(null);
       setIngestDraft('', '');
+      setIngestSource('', 'paste');
+      savedTextIdRef.current = null;
       setPhase('input');
       toast.success(
         effectiveParent === 'root'
@@ -698,6 +764,15 @@ export default function ImportPanel() {
     } finally {
       saveBusyRef.current = false;
     }
+  };
+
+  /** Загрузить сохранённый текст из библиотеки обратно в редактор импорта */
+  const useSavedText = (t: SavedText) => {
+    if (phase !== 'input') return;
+    setIngestDraft(t.title, t.text);
+    setIngestSource(t.sourceLabel === 'Вставленный текст' ? '' : t.sourceLabel, t.mode);
+    setSourceMode('paste');
+    toast.success(`Текст «${t.title}» загружен — проверь и нажми «Разобрать на атомы»`);
   };
 
   const SOURCE_TABS: { id: SourceMode; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
@@ -1345,6 +1420,11 @@ export default function ImportPanel() {
             <p className="text-xs text-muted-foreground">Не закрывай приложение — создаётся база заданий.</p>
           </CardContent>
         </Card>
+      )}
+
+      {/* ============ Библиотека сохранённых текстов ============ */}
+      {(phase === 'input' || phase === 'parsing') && (
+        <SavedTextsList onUse={useSavedText} />
       )}
 
       <Card>

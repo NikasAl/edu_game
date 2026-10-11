@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import { db, getMeta, setMeta } from '@/lib/db';
 import { DIFFICULTY_META, type DifficultyMode } from '@/lib/progress';
-import type { IngestResult, LLMProvider, ProviderType, TabId } from '@/lib/types';
+import type { ImportSourceMode, IngestResult, LLMProvider, ProviderType, TabId } from '@/lib/types';
 
 export type Theme = 'light' | 'dark';
 
@@ -70,7 +70,12 @@ interface AppState {
   ingestResult: IngestResult | null;
   ingestTitle: string;
   ingestSourceText: string;
+  /** Откуда взят текущий черновик: имя файла/URL — папка в библиотеке текстов */
+  ingestSourceLabel: string;
+  ingestSourceMode: ImportSourceMode;
   setIngestDraft: (title: string, sourceText: string) => void;
+  /** Запомнить источник применённых разделов (для библиотеки сохранённых текстов) */
+  setIngestSource: (label: string, mode: ImportSourceMode) => void;
   setIngestResult: (r: IngestResult | null) => void;
 
   init: () => Promise<void>;
@@ -168,7 +173,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   ingestResult: null,
   ingestTitle: '',
   ingestSourceText: '',
+  ingestSourceLabel: '',
+  ingestSourceMode: 'paste',
   setIngestDraft: (title, sourceText) => set({ ingestTitle: title, ingestSourceText: sourceText }),
+  setIngestSource: (label, mode) => set({ ingestSourceLabel: label, ingestSourceMode: mode }),
   setIngestResult: (r) => set({ ingestResult: r }),
 
   init: async () => {

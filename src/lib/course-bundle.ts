@@ -133,7 +133,16 @@ export function remapCoursePayload(payload: CoursePayload): RemappedCourse {
     if (!mid) continue;
     const rid = regId.get(n.regionId) ?? firstRegionByMat.get(mid);
     if (!rid) continue;
-    newNodes.push({ ...n, id: nodeId.get(n.id)!, materialId: mid, regionId: rid });
+    newNodes.push({
+      ...n,
+      id: nodeId.get(n.id)!,
+      materialId: mid,
+      regionId: rid,
+      // Связи с библиотекой текстов device-local: на другом устройстве
+      // сохранённых текстов нет — ссылки висячие, не переносим.
+      savedTextId: undefined,
+      sourceChar: undefined,
+    });
   }
 
   const newEdges: IdeaEdge[] = [];

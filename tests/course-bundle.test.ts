@@ -191,6 +191,22 @@ describe('remapCoursePayload — мусор и висячие ссылки', () 
     expect(out.materials).toHaveLength(1);
     expect(out.materials[0].parentId).toBeNull();
   });
+
+  it('device-local связи с библиотекой текстов не переносятся в курс', () => {
+    const p = payload();
+    const linked = p.nodes.map((n, i) => ({
+      ...n,
+      savedTextId: `st-${i}`,
+      sourceChar: i * 100,
+    }));
+    const out = remapCoursePayload({ ...p, nodes: linked });
+    for (const n of out.nodes) {
+      expect(n.savedTextId).toBeUndefined();
+      expect(n.sourceChar).toBeUndefined();
+    }
+    // цитата источника (обычный текст) сохраняется
+    expect(out.nodes.every((n) => n.title === 'Идея')).toBe(true);
+  });
 });
 
 // ============ parseCoursePayload ============

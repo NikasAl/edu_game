@@ -2,12 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { ClipboardPaste, ArrowLeft, ArrowRight, AlertTriangle, BookOpen, CheckCircle2, Eye, History, Lightbulb, Map as MapIcon, MessageCircle, PencilLine, Play, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
+import { ClipboardPaste, ArrowLeft, ArrowRight, AlertTriangle, CheckCircle2, Eye, History, Lightbulb, Map as MapIcon, MessageCircle, PencilLine, Play, RefreshCw, Send, Sparkles, Trophy, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import RichText from '@/components/RichText';
 import CodeBlock from '@/components/CodeBlock';
@@ -24,6 +23,7 @@ import { essayDuplicatesFeynman } from '@/lib/text-sim';
 import { computeSrsForNode, fmtDay, intervalFor, SRS_LADDER_DAYS, type SrsInfo } from '@/lib/srs';
 import { AnswerHelpers, appendChunk } from '@/components/app/AnswerHelpers';
 import IdeaChat from '@/components/app/IdeaChat';
+import SourceTextDialog from '@/components/app/SourceTextDialog';
 import type { Attempt, EssayGrade, FeynmanGrade, IdeaNode, OwnTaskVerdict, Task, TaskInstance } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -316,23 +316,7 @@ function IdeaCard({ node, onDiscuss }: { node: IdeaNode; onDiscuss: () => void }
             </p>
           </div>
         )}
-        {node.sourceRef && (
-          <Dialog>
-            <DialogTrigger asChild>
-              <Button variant="ghost" size="sm" className="self-start text-muted-foreground">
-                <BookOpen className="mr-1.5 h-4 w-4" /> Показать источник
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Источник</DialogTitle>
-              </DialogHeader>
-              <p className="text-sm leading-relaxed text-muted-foreground">
-                <RichText>{node.sourceRef}</RichText>
-              </p>
-            </DialogContent>
-          </Dialog>
-        )}
+        {node.sourceRef && <SourceTextDialog node={node} />}
         <Button variant="ghost" size="sm" className="self-start text-muted-foreground" onClick={onDiscuss}>
           <MessageCircle className="mr-1.5 h-4 w-4" /> Обсудить идею с ИИ
         </Button>

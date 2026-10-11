@@ -11,6 +11,8 @@ import type {
   NodeDraft,
   NodeProgressRec,
   Region,
+  SavedText,
+  SourceGroup,
   Task,
 } from './types';
 import { DEMO_MATERIAL, DEMO_EDGES, DEMO_NODES, DEMO_REGIONS, DEMO_TASKS, DEMO_MATERIAL_ID } from './demo-course';
@@ -26,6 +28,8 @@ export class EduGameDexie extends Dexie {
   progress!: Table<NodeProgressRec, string>;
   drafts!: Table<NodeDraft, string>;
   chatMessages!: Table<ChatMessage, string>;
+  textSources!: Table<SourceGroup, string>;
+  savedTexts!: Table<SavedText, string>;
   meta!: Table<MetaRec, string>;
 
   constructor() {
@@ -60,6 +64,13 @@ export class EduGameDexie extends Dexie {
     // v4: обсуждения идей с ИИ (история переписки по узлу)
     this.version(4).stores({
       chatMessages: 'id, nodeId, materialId, createdAt',
+    });
+    // v5: библиотека сохранённых текстов импорта (папки-источники + тексты).
+    // Тексты живут независимо от карт: разбор мог не удаться, карту могли удалить —
+    // источник всё равно остаётся доступным.
+    this.version(5).stores({
+      textSources: 'id, createdAt',
+      savedTexts: 'id, groupId, createdAt',
     });
   }
 }
@@ -115,7 +126,7 @@ export async function seedDemoIfFirstRun(): Promise<boolean> {
 export async function exportAll(): Promise<string> {
   const payload = {
     app: 'edu_game',
-    version: 4,
+    version: 5,
     exportedAt: new Date().toISOString(),
     materials: await db.materials.toArray(),
     regions: await db.regions.toArray(),
@@ -126,6 +137,8 @@ export async function exportAll(): Promise<string> {
     progress: await db.progress.toArray(),
     drafts: await db.drafts.toArray(),
     chatMessages: await db.chatMessages.toArray(),
+    textSources: await db.textSources.toArray(),
+    savedTexts: await db.savedTexts.toArray(),
     providers: await db.providers.toArray(),
   };
   return JSON.stringify(payload, null, 2);
@@ -140,6 +153,8 @@ const DATE_KEYS: Record<string, string[]> = {
   progress: ['updatedAt', 'masteredAt', 'srsDue'],
   drafts: ['updatedAt'],
   chatMessages: ['createdAt'],
+  textSources: ['createdAt'],
+  savedTexts: ['createdAt'],
   providers: ['createdAt', 'updatedAt'],
 };
 
@@ -222,6 +237,14 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
       createdAt: m.createdAt ?? new Date(),
     }));
     const providers = reviveRows<LLMProvider>(data.providers, 'providers');
+    // Библиотека текстов (v5): в старых бэкапах поля нет — пусто, groupId нормализуем
+    const textSources = reviveRows<SourceGroup>(data.textSources, 'textSources');
+    const savedTexts = reviveRows<SavedText>(data.savedTexts, 'savedTexts').map((t) => ({
+      ...t,
+      groupId: t.groupId ?? null,
+      sourceLabel: t.sourceLabel ?? '',
+      mode: t.mode ?? 'paste',
+    }));
 
     // Порционная запись без общей транзакции: уступаем UI между порциями
     // (крупный бэкап на Android иначе блокирует/убивает WebView-рендерер)
@@ -234,6 +257,8 @@ export async function importAll(json: string): Promise<{ ok: boolean; message: s
     if (progress.length) await chunkedPut(db.progress, progress);
     if (drafts.length) await chunkedPut(db.drafts, drafts);
     if (chatMessages.length) await chunkedPut(db.chatMessages, chatMessages);
+    if (textSources.length) await chunkedPut(db.textSources, textSources);
+    if (savedTexts.length) await chunkedPut(db.savedTexts, savedTexts);
     if (providers.length) await chunkedPut(db.providers, providers);
 
     const counts = `карт: ${materials.length}, узлов: ${nodes.length}, задач: ${tasks.length}, попыток: ${attempts.length}`;
