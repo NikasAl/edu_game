@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -25,27 +26,30 @@ import java.util.ArrayList;
 /**
  * ContinuousSpeech — фоновое непрерывное распознавание речи без системного попапа.
  *
- * Зачем свой плагин, если стоит @capacitor-community/speech-recognition:
- * 1. Community-плагин не передаёт Android-extras тишины, поэтому сервис Google
- *    закрывает сессию после каждой короткой паузы (~1 сек «конец фразы»), а на
- *    тишину без речи — по таймауту ~5 сек. JS-обёртка успевала перезапускать
- *    его лишь через 800 мс + переподключение сервиса: окно в 1.5–3 секунды,
- *    когда микрофон выключен, — начало фраз падало в него и терялось.
- * 2. Часть ошибок (таймаут тишины и др.) community-плагин не транслирует в
- *    JS-события вовсе — приходилось опрашивать isListening() по таймеру.
+ * Ограничения платформы (проверено по исходникам AOSP и актуальным разборам):
+ * - Официального параметра «длительность паузы до отключения» нет. Extras тишины
+ *   (EXTRA_SPEECH_INPUT_*_SILENCE_LENGTH_MILLIS) сервис Google чтит ТОЛЬКО в
+ *   сегментном режиме — javadoc RecognizerIntent: «it should be specified only
+ *   when it is also used as the value for EXTRA_SEGMENTED_SESSION».
+ * - Сигнал «динь» при вкл/выкл микрофона — фича ОС, поддерживаемого способа
+ *   отключить нет (csdcorp/speech_to_text README: «no supported way to disable
+ *   it»). Приглушаем аудиостримы на время диктовки.
  *
  * Как это устроено здесь:
- * - В Intent передаются EXTRA_SPEECH_INPUT_(POSSIBLY_)COMPLETE_SILENCE_LENGTH_MILLIS:
- *   сессия не считается завершённой, пока тишина короче 12/30 секунд (если сервис
- *   чтит extras — пауза на раздумье вообще не рвёт сессию; если нет — сессии
- *   станут короче, но рестарт ниже всё равно держит непрерывность записи).
- * - Перезапуск происходит ВНУТРИ Java (onResults/onError → новая сессия через
- *   ~220 мс, с backoff на серийных ошибках) — без круга через JS-мост, окно
- *   выключенного микрофона минимально.
- * - Текст сессии не теряется на границах: последний кумулятивный partial
- *   догоняет JS событием final, если сессия закончилась без onResults.
- * - Системные сигналы включения/выключения микрофона приглушаются на ~700 мс
- *   (STREAM_MUSIC, только если у пользователя не играет музыка).
+ * - СЕГМЕНТНЫЙ РЕЖИМ (API 33+): EXTRA_SEGMENTED_SESSION =
+ *   EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS. Сессия НЕ завершается
+ *   после каждой фразы: finalized фразы приходят через onSegmentResults, а
+ *   сама сессия живёт, пока тишина короче порога (30 с). Микрофон не
+ *   выключается — нет ни «динь», ни окон потери звука.
+ * - Если сервис не поддерживает сегментный режим (или сессия всё же кончилась
+ *   порогом тишины/ошибкой): рестарт ВНУТРИ Java с переиспользованием того же
+ *   экземпляра SpeechRecognizer (пауза ~150 мс, backoff на серийных ошибках,
+ *   пересоздание экземпляра после 3 неудач без onReadyForSpeech). Текст сессии
+ *   не теряется: последний кумулятивный partial догоняет событием final.
+ * - Системные «динь» приглушаются на ВСЮ диктовку: STREAM_MUSIC — только если
+ *   у пользователя не играет музыка; плюс STREAM_SYSTEM и STREAM_NOTIFICATION
+ *   (сигнал встречается на каждом из этих стримов в зависимости от прошивки).
+ *   Громкость возвращается на stop/fatal/уничтожении активити.
  * - Все вызовы SpeechRecognizer выполняются на main thread (требование API);
  *   события наружу: partial {text}, final {text}, fatal {code,message}.
  */
@@ -64,13 +68,15 @@ public class ContinuousSpeechPlugin extends Plugin {
     /** Более ранний порог «возможно закончил» — даёт финал и догон текста в поле */
     private static final long DEFAULT_POSSIBLE_SILENCE_MILLIS = 12000L;
     /** Пауза перед новой сессией после штатного завершения предыдущей */
-    private static final long RESTART_DELAY_MS = 220L;
+    private static final long RESTART_DELAY_MS = 150L;
+    /** Повтор при ERROR_RECOGNIZER_BUSY: сервис ещё закрывает прошлую сессию */
+    private static final long BUSY_RETRY_DELAY_MS = 350L;
     /** Верхняя граница backoff при серийных ошибках без единой речи */
     private static final long MAX_BACKOFF_MS = 5000L;
     /** Сколько рестартов подряд без onReadyForSpeech считаем поломкой сервиса */
     private static final int MAX_RESTARTS_WITHOUT_READY = 30;
-    /** На сколько приглушать системные сигналы распознавателя */
-    private static final long MUTE_WINDOW_MS = 700L;
+    /** После уничтожения распознавателя даём сигналу выключения проиграться в тишине */
+    private static final long UNMUTE_DELAY_MS = 400L;
 
     private SpeechRecognizer recognizer;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -85,7 +91,9 @@ public class ContinuousSpeechPlugin extends Plugin {
     private String lastPartial = "";
     private Runnable pendingRestart;
     private int restartsSinceReady = 0;
-    private boolean beepsMuted = false;
+    /** Глушим ли сейчас системные сигналы (на всю диктовку) */
+    private boolean dingsMuted = false;
+    private boolean mutedMusic = false;
 
     // ------------------------------------------------------------ plugin API
 
@@ -125,8 +133,9 @@ public class ContinuousSpeechPlugin extends Plugin {
         wantListening = false;
         mainHandler.post(() -> {
             cancelPendingRestart();
-            muteRecognitionSounds();
             destroyRecognizer();
+            // сигналу выключения даём проиграться в тишине, потом вернём громкость
+            mainHandler.postDelayed(this::unmuteDings, UNMUTE_DELAY_MS);
         });
         call.resolve();
     }
@@ -154,10 +163,13 @@ public class ContinuousSpeechPlugin extends Plugin {
 
     private void startRecognizer() {
         if (!wantListening) return;
-        destroyRecognizer();
-        muteRecognitionSounds();
+        muteDings();
         try {
-            recognizer = SpeechRecognizer.createSpeechRecognizer(getContext());
+            // экземпляр переиспользуется между сессиями: пересоздание стоило бы
+            // лишних сотен мс привязки сервиса и окна без микрофона
+            if (recognizer == null) {
+                recognizer = SpeechRecognizer.createSpeechRecognizer(getContext());
+            }
             recognizer.setRecognitionListener(listener);
             recognizer.startListening(buildIntent());
         } catch (Exception ex) {
@@ -175,9 +187,18 @@ public class ContinuousSpeechPlugin extends Plugin {
         intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
         // long-form диктовка: сервис старается не резать фразы по запятым
         intent.putExtra("android.speech.extra.DICTATION_MODE", true);
-        // тишина не завершает сессию раньше этих порогов (если сервис чтит extras)
+        // тишина не завершает сессию раньше этих порогов
         intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, completeSilenceMillis);
         intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, possibleSilenceMillis);
+        // ГЛАВНОЕ: extras тишины сервис чтит только в сегментном режиме
+        // (javadoc RecognizerIntent: «should be specified only when it is also
+        // used as the value for EXTRA_SEGMENTED_SESSION»). В сегментном режиме
+        // сессия не кончается после каждой фразы — finalized фразы приходят
+        // через onSegmentResults, сессия живёт до порога полной тишины.
+        if (Build.VERSION.SDK_INT >= 33) {
+            intent.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION,
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS);
+        }
         return intent;
     }
 
@@ -230,6 +251,7 @@ public class ContinuousSpeechPlugin extends Plugin {
         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             wantListening = false;
             destroyRecognizer();
+            unmuteDings();
             notifyFatal("permission", "Нет доступа к микрофону — разреши его для приложения");
             return;
         }
@@ -239,14 +261,21 @@ public class ContinuousSpeechPlugin extends Plugin {
             wantListening = false;
             flushPartialAsFinal();
             destroyRecognizer();
+            unmuteDings();
             notifyFatal("service", "Сервис распознавания речи не отвечает");
             return;
         }
 
-        // первые неудачи перезапускаем почти сразу; серийные — с backoff
-        long delay = restartsSinceReady <= 2
-            ? RESTART_DELAY_MS
-            : Math.min(RESTART_DELAY_MS * (restartsSinceReady - 1), MAX_BACKOFF_MS);
+        // экземпляр так и не ожил — пересоздаём целиком (перепривязка сервиса)
+        if (restartsSinceReady >= 3) destroyRecognizer();
+
+        // BUSY — чуть дольше (сервис ещё закрывает прошлую сессию); первые
+        // неудачи перезапускаем почти сразу; серийные — с backoff
+        long delay = error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+            ? BUSY_RETRY_DELAY_MS
+            : restartsSinceReady <= 2
+                ? RESTART_DELAY_MS
+                : Math.min(RESTART_DELAY_MS * (restartsSinceReady - 1), MAX_BACKOFF_MS);
         scheduleRestart(delay);
     }
 
@@ -260,28 +289,73 @@ public class ContinuousSpeechPlugin extends Plugin {
     // ------------------------------------------------- звуковые сигналы
 
     /**
-     * Сервис Google проигрывает «динь» на старте/остановке микрофона. На время
-     * перехода между сессиями глушим STREAM_MUSIC (только если у пользователя
-     * сейчас не играет музыка — её приглушать нельзя).
+     * Сервис Google (и вендорские распознаватели) играют «динь» при каждом
+     * вкл/выкл микрофона — это фича ОС, официального переключателя нет.
+     * Раньше глушали на 700 мс вокруг рестарта, но сигнал играет сервис
+     * АСИНХРОННО (привязка занимает сотни мс) и на разных стримах — окно
+     * промахивалось. Теперь глушим на ВСЮ диктовку: MUSIC — только если у
+     * пользователя не играет музыка; SYSTEM/NOTIFICATION — всегда (сигнал
+     * бывает на каждом из них в зависимости от прошивки).
      */
-    private void muteRecognitionSounds() {
-        if (!muteSounds || beepsMuted) return;
+    private void muteDings() {
+        if (!muteSounds || dingsMuted) return;
         AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-        if (am == null || am.isMusicActive()) return;
-        try {
-            beepsMuted = true;
-            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0);
-            mainHandler.postDelayed(() -> {
-                beepsMuted = false;
-                try {
-                    am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0);
-                } catch (Exception ignored) {
-                    // окно приглушения уже не актуально
-                }
-            }, MUTE_WINDOW_MS);
-        } catch (Exception ignored) {
-            beepsMuted = false;
+        if (am == null) return;
+        dingsMuted = true;
+        mutedMusic = false;
+        if (!am.isMusicActive()) {
+            try {
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0);
+                mutedMusic = true;
+            } catch (Exception ignored) {
+                // отдельные стримы на части прошивок глушить нельзя — не критично
+            }
         }
+        try {
+            am.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0);
+        } catch (Exception ignored) {
+            // см. выше
+        }
+        try {
+            am.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_MUTE, 0);
+        } catch (Exception ignored) {
+            // см. выше
+        }
+    }
+
+    /** Возвращает громкость после диктовки (stop / fatal / уничтожение активити) */
+    private void unmuteDings() {
+        if (!dingsMuted) return;
+        dingsMuted = false;
+        AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) return;
+        if (mutedMusic) {
+            mutedMusic = false;
+            try {
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0);
+            } catch (Exception ignored) {
+                // симметрично mute
+            }
+        }
+        try {
+            am.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0);
+        } catch (Exception ignored) {
+            // симметрично mute
+        }
+        try {
+            am.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_UNMUTE, 0);
+        } catch (Exception ignored) {
+            // симметрично mute
+        }
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        wantListening = false;
+        cancelPendingRestart();
+        destroyRecognizer();
+        unmuteDings();
+        super.handleOnDestroy();
     }
 
     // --------------------------------------------------------- listener
@@ -319,7 +393,7 @@ public class ContinuousSpeechPlugin extends Plugin {
         @Override
         public void onEndOfSpeech() {
             // Пользователь замолчал. ВАЖНО: это НЕ конец сессии — при чтимых
-            // extras сервис продолжит ждать (до порога тишины), при неп чтимых
+            // extras сервис продолжит ждать (до порога тишины), при нечитаемых
             // следом придут onResults/onError и рестарт. Ничего не делаем:
             // короткая пауза в речи не должна рвать запись.
         }
@@ -343,6 +417,28 @@ public class ContinuousSpeechPlugin extends Plugin {
                 ret.put("text", text);
                 notifyListeners(EVENT_FINAL, ret);
             }
+            scheduleRestart(RESTART_DELAY_MS);
+        }
+
+        @Override
+        public void onSegmentResults(Bundle segmentResults) {
+            // Сегментный режим (API 33+): фраза финализирована, сессия ПРОДОЛЖАЕТСЯ.
+            // Отдаём как final — поле дополняется сразу; черновик сбрасываем,
+            // сегмент его покрывает (частичные результаты кумулятивны внутри
+            // текущего сегмента).
+            String text = firstMatch(segmentResults);
+            lastPartial = "";
+            if (!text.isEmpty()) {
+                JSObject ret = new JSObject();
+                ret.put("text", text);
+                notifyListeners(EVENT_FINAL, ret);
+            }
+        }
+
+        @Override
+        public void onEndOfSegmentedSession() {
+            // Сессия сегментного режима кончилась (порог тишины 30 с или решение
+            // сервиса) — штатный рестарт, тот же путь, что после onResults.
             scheduleRestart(RESTART_DELAY_MS);
         }
 
