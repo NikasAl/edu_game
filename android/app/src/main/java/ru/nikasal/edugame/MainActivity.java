@@ -23,6 +23,9 @@ public class MainActivity extends BridgeActivity {
     @Override
     protected void load() {
         registerPlugin(NativeHttpPlugin.class);
+        // Непрерывная диктовка: сессия распознавания терпит паузы до 12/30 сек
+        // (extras тишины в Intent), рестарты — внутри Java без потери текста.
+        registerPlugin(ContinuousSpeechPlugin.class);
         super.load();
     }
 

@@ -10,28 +10,28 @@
  *
  * В браузере — Web Speech API (Chrome/Edge, кнопка скрыта, если API нет):
  * continuous-режим + автоперезапуск, когда браузер всё же закрыл сессию на тишине.
- * В APK (Capacitor) — @capacitor-community/speech-recognition в фоновом режиме
- * (popup: false, partialResults: true, без системного диалога): плагин закрывает
- * внутреннюю сессию распознавания на паузе — мы сразу открываем новую. Конец
- * сессии ловится двумя путями: событие listeningState=stopped и watchdog-опрос
- * isListening() раз в 2 сек (некоторые ошибки, например таймаут тишины, не дают
- * JS-события вовсе). Плагин импортируется динамически и только в нативной среде:
- * на веб-сборке его код не выполняется.
+ * В APK (Capacitor) — собственный нативный плагин ContinuousSpeech (см.
+ * src/lib/nativeSpeech.ts): ОДНА сессия распознавания терпит паузу до 12/30 сек
+ * (extras тишины в Intent), рестарты происходят ВНУТРИ Java без круга через
+ * JS-мост — окно выключенного микрофона минимально, фразы не режутся. Текст
+ * доезжает событиями partial (живая подсказка под кнопкой) и final (дописывается
+ * в поле). Плагин импортируется динамически и только в нативной среде: на
+ * веб-сборке его код не выполняется.
  */
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Mic, Square } from 'lucide-react';
 import { toast } from 'sonner';
+import type { PluginListenerHandle } from '@capacitor/core';
+import type { ContinuousSpeechPlugin } from '@/lib/nativeSpeech';
 import { isNativePlatform } from '@/lib/nativeHttp';
+import { previewTail } from '@/lib/dictation';
 import { cn } from '@/lib/utils';
+
+/** Дописать кусок к набранному тексту (нужен NodeView'у по старому пути) */
+export { appendChunk } from '@/lib/dictation';
 
 /** Платформенная среда неизменна за сессию — подписка не нужна */
 const subscribeNoop = () => () => {};
-
-/** Дописать кусок к набранному тексту с аккуратным разделителем */
-export function appendChunk(prev: string, chunk: string): string {
-  if (!prev.trim()) return chunk;
-  return /[\s\n]$/.test(prev) ? prev + chunk : prev + ' ' + chunk;
-}
 
 // ---- Web Speech API (браузер): минимальные типы без any ----
 
@@ -67,46 +67,18 @@ function webSpeechCtor(): SpeechRecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
-// ---- Нативный плагин: минимальный тип используемого API ----
-
-interface NativePluginHandle {
-  remove: () => Promise<void>;
-}
-interface NativeSpeechPlugin {
-  start(options?: {
-    language?: string;
-    maxResults?: number;
-    partialResults?: boolean;
-    popup?: boolean;
-    prompt?: string;
-  }): Promise<{ matches?: string[] } | void>;
-  stop(): Promise<void>;
-  isListening(): Promise<{ listening: boolean }>;
-  removeAllListeners(): Promise<void>;
-  addListener(
-    eventName: 'partialResults',
-    listenerFunc: (data: { matches?: string[] }) => void
-  ): Promise<NativePluginHandle>;
-  addListener(
-    eventName: 'listeningState',
-    listenerFunc: (data: { status: 'started' | 'stopped' }) => void
-  ): Promise<NativePluginHandle>;
-}
+// ---- Нативный плагин ContinuousSpeech (типы — см. src/lib/nativeSpeech.ts) ----
 
 /** Состояние нативной сессии диктовки (живёт в ref — перерисовки не нужны) */
 interface NativeSession {
-  plugin: NativeSpeechPlugin | null;
-  /** последний partial-текст текущей сессии плагина (дописывается на конце сессии) */
+  plugin: ContinuousSpeechPlugin | null;
+  /** черновик текущей сессии плагина — дописывается, если сессия кончилась без финала */
   pending: string | null;
-  restartTimer: ReturnType<typeof setTimeout> | null;
-  watchdog: ReturnType<typeof setInterval> | null;
-  handles: Promise<NativePluginHandle>[];
-  /** защита от параллельных перезапусков watchdog'а */
-  ticking: boolean;
+  handles: Promise<PluginListenerHandle>[];
 }
 
 function newNativeSession(): NativeSession {
-  return { plugin: null, pending: null, restartTimer: null, watchdog: null, handles: [], ticking: false };
+  return { plugin: null, pending: null, handles: [] };
 }
 
 /** Единственная активная сессия диктовки на всё приложение (Android-распознаватель — синглтон) */
@@ -121,6 +93,8 @@ export function AnswerHelpers({
   disabled?: boolean;
 }) {
   const [listening, setListening] = useState(false);
+  // живой черновик распознавания для подсказки под кнопкой (нативная сессия)
+  const [livePartial, setLivePartial] = useState('');
   // сессия диктовки активна (включена кнопкой, выключается той же кнопкой)
   const activeRef = useRef(false);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
@@ -208,7 +182,7 @@ export function AnswerHelpers({
     }
   }
 
-  // ================= native =================
+  // ================= native (ContinuousSpeech) =================
 
   function commitPending() {
     const p = nativeRef.current.pending;
@@ -216,106 +190,58 @@ export function AnswerHelpers({
     if (p) onAppendRef.current(p);
   }
 
-  function clearNativeTimers() {
-    const n = nativeRef.current;
-    if (n.restartTimer) {
-      clearTimeout(n.restartTimer);
-      n.restartTimer = null;
-    }
-    if (n.watchdog) {
-      clearInterval(n.watchdog);
-      n.watchdog = null;
-    }
-  }
-
-  /** Один заход нативного распознавания: partialResults-события копят текст, конец сессии ловят слушатели */
-  async function runNativeOnce() {
-    const plugin = nativeRef.current.plugin;
-    if (!plugin || !activeRef.current) return;
-    nativeRef.current.pending = null;
-    try {
-      // popup: false — без системного диалога; start() резолвится сразу,
-      // окончание сессии приходит событиями partialResults/listeningState
-      await plugin.start({ language: 'ru-RU', maxResults: 1, partialResults: true, popup: false });
-    } catch {
-      // распознаватель занят/ошибка — попробуем снова, пока сессия активна
-      scheduleNativeRestart(1200);
-    }
-  }
-
-  function scheduleNativeRestart(delayMs: number) {
-    if (!activeRef.current) return;
-    const n = nativeRef.current;
-    if (n.restartTimer) clearTimeout(n.restartTimer);
-    n.restartTimer = setTimeout(() => {
-      n.restartTimer = null;
-      if (!activeRef.current) return;
-      commitPending(); // дописать последнюю фразу закрывшейся сессии
-      void runNativeOnce();
-    }, delayMs);
-  }
-
-  async function watchdogTick() {
-    const n = nativeRef.current;
-    if (!activeRef.current || n.restartTimer || n.ticking) return;
-    n.ticking = true;
-    try {
-      const { listening: isL } = await n.plugin?.isListening() ?? { listening: false };
-      // сессия плагина заглохла без события (таймаут тишины и т.п.) — перезапуск
-      if (!isL && !nativeRef.current.restartTimer) scheduleNativeRestart(0);
-    } catch {
-      /* плагин недоступен — сессию закроет stop/размонтирование */
-    } finally {
-      n.ticking = false;
-    }
-  }
-
   async function startNative() {
     activeRef.current = true;
     try {
-      const { SpeechRecognition } = await import('@capacitor-community/speech-recognition');
-      await SpeechRecognition.requestPermissions();
-      const { available } = await SpeechRecognition.available();
-      if (!available) {
-        toast.error('Распознавание речи недоступно на этом устройстве');
-        activeRef.current = false;
-        return;
-      }
-      if (!activeRef.current) return; // пользователь уже нажал stop
-      nativeRef.current.plugin = SpeechRecognition as unknown as NativeSpeechPlugin;
-      await SpeechRecognition.removeAllListeners();
+      const { ContinuousSpeech } = await import('@/lib/nativeSpeech');
+      nativeRef.current.plugin = ContinuousSpeech;
       nativeRef.current.handles = [
-        SpeechRecognition.addListener('partialResults', (data: { matches?: string[] }) => {
-          const t = data.matches?.[0]?.trim();
-          if (t) nativeRef.current.pending = t;
+        // живой черновик текущей сессии — виден в подсказке,
+        // в поле дописывается на границе сессии (final) или по stop
+        ContinuousSpeech.addListener('partial', ({ text }) => {
+          const t = text.trim();
+          nativeRef.current.pending = t || null;
+          setLivePartial(t);
         }),
-        SpeechRecognition.addListener('listeningState', (data: { status: 'started' | 'stopped' }) => {
-          // onEndOfSpeech: пользователь замолчал — финальный текст придёт следом,
-          // поэтому перезапуск с задержкой; пауза до 30+ сек между фразами — норм
-          if (data.status === 'stopped') scheduleNativeRestart(800);
+        ContinuousSpeech.addListener('final', ({ text }) => {
+          const t = text.trim();
+          nativeRef.current.pending = null;
+          setLivePartial('');
+          if (t) onAppendRef.current(t);
+        }),
+        ContinuousSpeech.addListener('fatal', (data) => {
+          if (!activeRef.current) return;
+          if (data.message) toast.error(data.message);
+          stopSession();
         }),
       ];
+      // одна длинная сессия внутри плагина: пауза на раздумье до 12/30 сек её
+      // не рвёт, на завершении плагин сам открывает новую — JS ничего не
+      // перезапускает и не опрашивает таймерами, потеря фраз исключена
+      await ContinuousSpeech.start({ lang: 'ru-RU' });
+      if (!activeRef.current) {
+        void stopNative(); // пользователь уже нажал stop, пока плагин стартовал
+        return;
+      }
       setListening(true);
-      await runNativeOnce();
-      // watchdog: часть ошибок плагина не даёт JS-событий — опрашиваем isListening
-      nativeRef.current.watchdog = setInterval(() => void watchdogTick(), 2000);
     } catch {
       toast.error('Не удалось запустить распознавание речи');
       activeRef.current = false;
       setListening(false);
+      nativeRef.current.plugin = null;
     }
   }
 
   async function stopNative() {
     const n = nativeRef.current;
     activeRef.current = false;
-    clearNativeTimers();
     commitPending(); // то, что успело распознаться, — в поле
     const plugin = n.plugin;
     n.plugin = null;
     const handles = n.handles;
     n.handles = [];
     n.pending = null;
+    setLivePartial('');
     if (handles.length > 0) {
       void Promise.all(
         handles.map((h) =>
@@ -362,7 +288,16 @@ export function AnswerHelpers({
   };
 
   return (
-    <div className="flex items-center">
+    <div className="relative flex items-center">
+      {listening && livePartial ? (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute right-0 top-full z-20 mt-2 flex max-w-[85vw] items-start gap-1.5 rounded-lg border border-rose-500/30 bg-popover/95 px-2.5 py-1.5 text-xs leading-snug text-muted-foreground shadow-lg"
+        >
+          <span className="mt-1 h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-rose-500" />
+          <span className="line-clamp-2">{previewTail(livePartial)}</span>
+        </div>
+      ) : null}
       <button
         type="button"
         disabled={disabled}
