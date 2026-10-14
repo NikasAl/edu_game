@@ -41,9 +41,6 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Диктовка (ContinuousSpeechPlugin): RECORD_AUDIO + поиск сервиса распознавания -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Глушение системных «динь» распознавателя на время диктовки
-         (adjustStreamVolume на части прошивок требует этого разрешения) -->
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <queries>
         <intent>

@@ -3,7 +3,6 @@ package ru.nikasal.edugame;
 import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
-import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -33,7 +32,8 @@ import java.util.ArrayList;
  *   when it is also used as the value for EXTRA_SEGMENTED_SESSION».
  * - Сигнал «динь» при вкл/выкл микрофона — фича ОС, поддерживаемого способа
  *   отключить нет (csdcorp/speech_to_text README: «no supported way to disable
- *   it»). Приглушаем аудиостримы на время диктовки.
+ *   it»). Мы его НЕ глушим: в сегментном режиме микрофон не выключается, и
+ *   сигнал просто не звучит; экономим разрешение MODIFY_AUDIO_SETTINGS.
  *
  * Как это устроено здесь:
  * - СЕГМЕНТНЫЙ РЕЖИМ (API 33+): EXTRA_SEGMENTED_SESSION =
@@ -46,10 +46,6 @@ import java.util.ArrayList;
  *   экземпляра SpeechRecognizer (пауза ~150 мс, backoff на серийных ошибках,
  *   пересоздание экземпляра после 3 неудач без onReadyForSpeech). Текст сессии
  *   не теряется: последний кумулятивный partial догоняет событием final.
- * - Системные «динь» приглушаются на ВСЮ диктовку: STREAM_MUSIC — только если
- *   у пользователя не играет музыка; плюс STREAM_SYSTEM и STREAM_NOTIFICATION
- *   (сигнал встречается на каждом из этих стримов в зависимости от прошивки).
- *   Громкость возвращается на stop/fatal/уничтожении активити.
  * - Все вызовы SpeechRecognizer выполняются на main thread (требование API);
  *   события наружу: partial {text}, final {text}, fatal {code,message}.
  */
@@ -75,8 +71,6 @@ public class ContinuousSpeechPlugin extends Plugin {
     private static final long MAX_BACKOFF_MS = 5000L;
     /** Сколько рестартов подряд без onReadyForSpeech считаем поломкой сервиса */
     private static final int MAX_RESTARTS_WITHOUT_READY = 30;
-    /** После уничтожения распознавателя даём сигналу выключения проиграться в тишине */
-    private static final long UNMUTE_DELAY_MS = 400L;
 
     private SpeechRecognizer recognizer;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -85,15 +79,10 @@ public class ContinuousSpeechPlugin extends Plugin {
     private String language = "ru-RU";
     private long completeSilenceMillis = DEFAULT_COMPLETE_SILENCE_MILLIS;
     private long possibleSilenceMillis = DEFAULT_POSSIBLE_SILENCE_MILLIS;
-    private boolean muteSounds = true;
-
     /** Кумулятивный текст текущей сессии (последний partial) — страховой flush на границе */
     private String lastPartial = "";
     private Runnable pendingRestart;
     private int restartsSinceReady = 0;
-    /** Глушим ли сейчас системные сигналы (на всю диктовку) */
-    private boolean dingsMuted = false;
-    private boolean mutedMusic = false;
 
     // ------------------------------------------------------------ plugin API
 
@@ -108,8 +97,6 @@ public class ContinuousSpeechPlugin extends Plugin {
         completeSilenceMillis = complete == null ? DEFAULT_COMPLETE_SILENCE_MILLIS : complete.longValue();
         Double possible = call.getDouble("possibleSilenceMillis");
         possibleSilenceMillis = possible == null ? DEFAULT_POSSIBLE_SILENCE_MILLIS : possible.longValue();
-        Boolean mute = call.getBoolean("muteSounds");
-        muteSounds = mute == null || mute;
 
         if (getPermissionState("microphone") != PermissionState.GRANTED) {
             requestAllPermissions(call, "startAfterPermission");
@@ -134,8 +121,6 @@ public class ContinuousSpeechPlugin extends Plugin {
         mainHandler.post(() -> {
             cancelPendingRestart();
             destroyRecognizer();
-            // сигналу выключения даём проиграться в тишине, потом вернём громкость
-            mainHandler.postDelayed(this::unmuteDings, UNMUTE_DELAY_MS);
         });
         call.resolve();
     }
@@ -163,7 +148,6 @@ public class ContinuousSpeechPlugin extends Plugin {
 
     private void startRecognizer() {
         if (!wantListening) return;
-        muteDings();
         try {
             // экземпляр переиспользуется между сессиями: пересоздание стоило бы
             // лишних сотен мс привязки сервиса и окна без микрофона
@@ -251,7 +235,6 @@ public class ContinuousSpeechPlugin extends Plugin {
         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             wantListening = false;
             destroyRecognizer();
-            unmuteDings();
             notifyFatal("permission", "Нет доступа к микрофону — разреши его для приложения");
             return;
         }
@@ -261,7 +244,6 @@ public class ContinuousSpeechPlugin extends Plugin {
             wantListening = false;
             flushPartialAsFinal();
             destroyRecognizer();
-            unmuteDings();
             notifyFatal("service", "Сервис распознавания речи не отвечает");
             return;
         }
@@ -286,75 +268,11 @@ public class ContinuousSpeechPlugin extends Plugin {
         notifyListeners(EVENT_FATAL, ret);
     }
 
-    // ------------------------------------------------- звуковые сигналы
-
-    /**
-     * Сервис Google (и вендорские распознаватели) играют «динь» при каждом
-     * вкл/выкл микрофона — это фича ОС, официального переключателя нет.
-     * Раньше глушали на 700 мс вокруг рестарта, но сигнал играет сервис
-     * АСИНХРОННО (привязка занимает сотни мс) и на разных стримах — окно
-     * промахивалось. Теперь глушим на ВСЮ диктовку: MUSIC — только если у
-     * пользователя не играет музыка; SYSTEM/NOTIFICATION — всегда (сигнал
-     * бывает на каждом из них в зависимости от прошивки).
-     */
-    private void muteDings() {
-        if (!muteSounds || dingsMuted) return;
-        AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-        if (am == null) return;
-        dingsMuted = true;
-        mutedMusic = false;
-        if (!am.isMusicActive()) {
-            try {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0);
-                mutedMusic = true;
-            } catch (Exception ignored) {
-                // отдельные стримы на части прошивок глушить нельзя — не критично
-            }
-        }
-        try {
-            am.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0);
-        } catch (Exception ignored) {
-            // см. выше
-        }
-        try {
-            am.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_MUTE, 0);
-        } catch (Exception ignored) {
-            // см. выше
-        }
-    }
-
-    /** Возвращает громкость после диктовки (stop / fatal / уничтожение активити) */
-    private void unmuteDings() {
-        if (!dingsMuted) return;
-        dingsMuted = false;
-        AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-        if (am == null) return;
-        if (mutedMusic) {
-            mutedMusic = false;
-            try {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0);
-            } catch (Exception ignored) {
-                // симметрично mute
-            }
-        }
-        try {
-            am.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0);
-        } catch (Exception ignored) {
-            // симметрично mute
-        }
-        try {
-            am.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, AudioManager.ADJUST_UNMUTE, 0);
-        } catch (Exception ignored) {
-            // симметрично mute
-        }
-    }
-
     @Override
     protected void handleOnDestroy() {
         wantListening = false;
         cancelPendingRestart();
         destroyRecognizer();
-        unmuteDings();
         super.handleOnDestroy();
     }
 

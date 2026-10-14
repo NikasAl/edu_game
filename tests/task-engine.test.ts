@@ -6,6 +6,7 @@ import {
   isParametric,
   normalizeCodeAnswer,
   codeAnswerVariants,
+  shuffledOrder,
 } from '@/lib/task-engine';
 import type { Task } from '@/lib/types';
 
@@ -261,5 +262,46 @@ describe('isParametric', () => {
   it('есть params → true, нет → false', () => {
     expect(isParametric(mkTask({ params: [{ name: 'a', choices: [1] }] }))).toBe(true);
     expect(isParametric(mkTask())).toBe(false);
+  });
+});
+
+describe('shuffledOrder — перемешивание показа вариантов choice', () => {
+  it('возвращает перестановку [0..n-1]: те же элементы без повторов и потерь', () => {
+    for (const n of [0, 1, 2, 3, 5, 8]) {
+      const order = shuffledOrder(n);
+      expect(order).toHaveLength(n);
+      expect([...order].sort((a, b) => a - b)).toEqual(Array.from({ length: n }, (_, i) => i));
+    }
+  });
+
+  it('детерминирован при подменённом rng', () => {
+    const seq = [0.9, 0.1, 0.65, 0.4, 0.3];
+    const makeRng = () => {
+      let i = 0;
+      return () => seq[i++ % seq.length];
+    };
+    const a = shuffledOrder(4, makeRng());
+    const b = shuffledOrder(4, makeRng());
+    expect(a).toEqual(b);
+    expect(a).not.toEqual([0, 1, 2, 3]); // выбранный ГПСЧ реально тасует
+  });
+
+  it('тасует честно: на большом числе прогонов правильный вариант бывает на каждой позиции', () => {
+    const n = 4;
+    const firstPosCounts = new Array(n).fill(0);
+    for (let t = 0; t < 4000; t++) {
+      const order = shuffledOrder(n);
+      // правильный ответ записан первым (correctIndex = 0) — где он показан?
+      firstPosCounts[order.indexOf(0)]++;
+    }
+    for (const c of firstPosCounts) {
+      expect(c).toBeGreaterThan(600); // ~1000 ожидается; < 600 — перекос
+    }
+  });
+
+  it('краевые случаи: n=0 и отрицательное n — пустой массив', () => {
+    expect(shuffledOrder(0)).toEqual([]);
+    expect(shuffledOrder(-3)).toEqual([]);
+    expect(shuffledOrder(1)).toEqual([0]);
   });
 });

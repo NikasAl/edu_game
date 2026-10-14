@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import {
   Check,
   Copy,
@@ -10,6 +11,7 @@ import {
   Pencil,
   Plug,
   Plus,
+  RotateCcw,
   ScrollText,
   Share2,
   Sun,
@@ -24,6 +26,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -31,7 +35,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { exportAll, importAll, resetMaterialProgress, getMeta, setMeta } from '@/lib/db';
+import { db, exportAll, importAll, resetMaterialProgress, getMeta, setMeta } from '@/lib/db';
 import { DIFFICULTY_META, type DifficultyMode } from '@/lib/progress';
 import { isNativePlatform } from '@/lib/nativeHttp';
 import { saveJsonFile } from '@/lib/save-file';
@@ -85,6 +89,28 @@ export default function SettingsPanel() {
   );
 
   const [importing, setImporting] = useState(false);
+
+  // Сброс прогресса активной карты — опасное действие: только через подтверждение
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  // имя активной карты для текста подтверждения
+  const activeMaterial = useLiveQuery(
+    () => (activeMaterialId ? db.materials.get(activeMaterialId) : undefined),
+    [activeMaterialId]
+  );
+  const doResetProgress = async () => {
+    if (!activeMaterialId) return;
+    setResetting(true);
+    try {
+      await resetMaterialProgress(activeMaterialId);
+      toast.success('Прогресс карты сброшен');
+      setResetOpen(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Не удалось сбросить прогресс');
+    } finally {
+      setResetting(false);
+    }
+  };
 
   // настройки OCR (фото → текст через vision-модель)
   const [ocrProviderId, setOcrProviderId] = useState('');
@@ -492,18 +518,41 @@ export default function SettingsPanel() {
                 }}
               />
             </div>
-            <Button
-              variant="ghost"
-              className="mt-1 text-muted-foreground hover:text-destructive"
-              onClick={async () => {
-                if (activeMaterialId) {
-                  await resetMaterialProgress(activeMaterialId);
-                  toast.success('Прогресс материала сброшен');
-                }
-              }}
-            >
-              Сбросить прогресс активного материала
-            </Button>
+            {/* Опасная зона: явная кнопка + предупреждение + подтверждение.
+                Раньше это была невидимая ghost-кнопка, сбрасывавшая прогресс одним кликом */}
+            <div className="mt-2 flex flex-col gap-1.5">
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                Опасная зона: сброс нельзя отменить. Будут удалены все попытки ответов и расписание повторений активной
+                карты — все идеи вернутся в состояние «не освоено». Сами карты, идеи, задачи и черновики ответов
+                останутся на месте.
+              </p>
+              <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+                <DialogTrigger asChild>
+                  <Button variant="destructive" className="self-start" disabled={!activeMaterialId || resetting}>
+                    <RotateCcw className="mr-1 h-4 w-4" /> Сбросить прогресс активной карты
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Сбросить прогресс карты?</DialogTitle>
+                    <DialogDescription>
+                      Из карты «{activeMaterial?.title ?? '…'}» будут удалены все попытки ответов и расписание
+                      повторений — идеи вернутся в состояние «не освоено». Действие нельзя отменить. Сами карты, идеи,
+                      задачи и черновики останутся на месте.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setResetOpen(false)} disabled={resetting}>
+                      Отмена
+                    </Button>
+                    <Button variant="destructive" onClick={() => void doResetProgress()} disabled={resetting}>
+                      {resetting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-1 h-4 w-4" />}
+                      {resetting ? 'Сбрасываем…' : 'Да, сбросить прогресс'}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
           </CardContent>
         </Card>
       </section>

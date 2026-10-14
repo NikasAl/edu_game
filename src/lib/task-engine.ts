@@ -94,6 +94,25 @@ export function instantiateTask(task: Task): TaskInstance {
   return answerError ? { taskId: task.id, values, renderedPrompt, answer, answerError } : { taskId: task.id, values, renderedPrompt, answer };
 }
 
+/**
+ * Случайный порядок ПОКАЗА вариантов choice-задачи (тасование Фишера—Йетса).
+ * Возвращает перестановку исходных индексов: на позиции i отображается вариант
+ * order[i]. Нужна потому, что LLM и авторы часто пишут правильный вариант
+ * первым — без перемешивания он «прилипает» к первой позиции.
+ * Выбранный индекс (draft/attempt) и correctIndex остаются исходными —
+ * перемешивается только отображение. rng подменяется в тестах.
+ */
+export function shuffledOrder(n: number, rng: () => number = Math.random): number[] {
+  const order = Array.from({ length: Math.max(0, Math.floor(n)) }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const t = order[i];
+    order[i] = order[j];
+    order[j] = t;
+  }
+  return order;
+}
+
 export interface CheckResult {
   verdict: 'pass' | 'fail';
   correctAnswer?: string; // показывается после неверного ответа (опция)

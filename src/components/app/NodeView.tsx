@@ -15,7 +15,7 @@ import { db, setMeta } from '@/lib/db';
 import { useAppStore } from '@/store/useAppStore';
 import { useMaterialData } from '@/hooks/useMaterialData';
 import { useNodeDraft, useTaskAnswerDraft } from '@/hooks/useNodeDraft';
-import { checkAnswer, instantiateTask, isParametric, taskProblems } from '@/lib/task-engine';
+import { checkAnswer, instantiateTask, isParametric, shuffledOrder, taskProblems } from '@/lib/task-engine';
 import { countsForState, isOwnRequired, isTaskRequired } from '@/lib/progress';
 import { checkEssayLLM, gradeEssayLocal, gradeFeynmanLLM, gradeFeynmanLocal, validateOwnTaskLLM, validateOwnTaskLocal } from '@/lib/llm-ops';
 import { generateTasksForNodes } from '@/lib/task-gen';
@@ -609,6 +609,14 @@ function TaskTrial({
   }, [task, llmHints]);
   const passed = attempt?.verdict === 'pass' && verdict === 'pass';
   const choiceSpec = task.answerSpec.kind === 'choice' ? task.answerSpec : null;
+  // Перемешанный порядок ПОКАЗА вариантов: правильный ответ не всегда первым
+  // (LLM часто пишет его первым). choiceIdx хранит ИСХОДНЫЙ индекс варианта —
+  // черновик, попытка и проверка остаются в исходных индексах; стабильно,
+  // пока задача не сменилась и не нажат «другой вариант» (roll).
+  const choiceOrder = useMemo(
+    () => (choiceSpec ? shuffledOrder(choiceSpec.options.length) : []),
+    [choiceSpec, roll]
+  );
   const isCode = task.type === 'code_output' || task.type === 'code_fill';
 
   const reRandomize = () => {
@@ -759,18 +767,18 @@ function TaskTrial({
 
         {choiceSpec ? (
           <div className="flex flex-col gap-1.5">
-            {choiceSpec.options.map((opt, i) => (
+            {choiceOrder.map((orig) => (
               <button
-                key={i}
+                key={orig}
                 disabled={broken || (passed && !retake)}
-                onClick={() => setChoiceIdx(i)}
+                onClick={() => setChoiceIdx(orig)}
                 className={cn(
                   'rounded-lg border px-3 py-2.5 text-left text-sm transition-colors',
-                  choiceIdx === i ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/40',
-                  passed && i === choiceSpec.correctIndex && 'border-emerald-500/60 bg-emerald-500/10'
+                  choiceIdx === orig ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/40',
+                  passed && orig === choiceSpec.correctIndex && 'border-emerald-500/60 bg-emerald-500/10'
                 )}
               >
-                <RichText>{opt}</RichText>
+                <RichText>{choiceSpec.options[orig]}</RichText>
               </button>
             ))}
           </div>
@@ -1202,6 +1210,12 @@ function ReviewCard({
   const isEssay = reviewTask?.type === 'essay';
   const isCode = reviewTask?.type === 'code_output' || reviewTask?.type === 'code_fill';
   const choiceSpec = reviewTask?.answerSpec.kind === 'choice' ? reviewTask.answerSpec : null;
+  // Перемешанный порядок показа вариантов — как в основной задаче:
+  // пересобирается на каждом «Проверить память» (новый reviewTaskId)
+  const choiceOrder = useMemo(
+    () => (choiceSpec ? shuffledOrder(choiceSpec.options.length) : []),
+    [choiceSpec, reviewTaskId]
+  );
 
   const start = () => {
     if (pool.length === 0) return;
@@ -1319,17 +1333,17 @@ function ReviewCard({
 
             {choiceSpec ? (
               <div className="flex flex-col gap-1.5">
-                {choiceSpec.options.map((opt, i) => (
+                {choiceOrder.map((orig) => (
                   <button
-                    key={i}
+                    key={orig}
                     disabled={busy || verdict !== null}
-                    onClick={() => setChoiceIdx(i)}
+                    onClick={() => setChoiceIdx(orig)}
                     className={cn(
                       'rounded-lg border px-3 py-2.5 text-left text-sm transition-colors',
-                      choiceIdx === i ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/40'
+                      choiceIdx === orig ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/40'
                     )}
                   >
-                    <RichText>{opt}</RichText>
+                    <RichText>{choiceSpec.options[orig]}</RichText>
                   </button>
                 ))}
               </div>
