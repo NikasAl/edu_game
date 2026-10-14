@@ -101,7 +101,11 @@ const tasksAnswer = {
   ],
 };
 
-function pickAnswer(userContent) {
+function pickAnswer(userContent, allContent) {
+  // обсуждение идеи (наставник): системный промпт содержит маркер; ответ — обычный текст
+  if (allContent.includes('наставник-собеседник')) {
+    return `Хороший вопрос! Суть идеи — в её формулировке и примере: попробуй проговорить её своими словами и проверить на примере. Мок-ответ наставника: идея работает именно так, как описано в примере. Хочешь, разберём ещё один случай?`;
+  }
   if (userContent.includes('Перепиши эссе-задачу')) {
     return {
       prompt: 'Мок: даны три отношения на множестве — проверь каждое на рефлексивность и сравнимость элементов; какой из них частичный порядок и почему?',
@@ -142,8 +146,10 @@ const server = http.createServer((req, res) => {
     try {
       const parsed = JSON.parse(body || '{}');
       const userMsg = (parsed.messages ?? []).filter((m) => m.role === 'user').map((m) => m.content).join('\n');
-      const answer = pickAnswer(userMsg);
-      console.log(`[mock-llm] ${req.url} → ${answer === ingestAnswer ? 'ingest' : answer === graphAnswer ? 'graph' : 'tasks'} (${userMsg.length} chars)`);
+      const allMsg = (parsed.messages ?? []).map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n');
+      const answer = pickAnswer(userMsg, allMsg);
+      const isText = typeof answer === 'string';
+      console.log(`[mock-llm] ${req.url} → ${isText ? 'text' : answer === ingestAnswer ? 'ingest' : answer === graphAnswer ? 'graph' : 'tasks'} (${userMsg.length} chars)`);
       // небольшая задержка — как у настоящей модели, чтобы видеть фазы в UI
       setTimeout(() => {
         res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
@@ -156,7 +162,7 @@ const server = http.createServer((req, res) => {
             choices: [
               {
                 index: 0,
-                message: { role: 'assistant', content: JSON.stringify(answer) },
+                message: { role: 'assistant', content: isText ? answer : JSON.stringify(answer) },
                 finish_reason: 'stop',
               },
             ],
