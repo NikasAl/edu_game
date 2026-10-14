@@ -15,6 +15,31 @@ export function childrenOf(materials: Material[], parentId: string | null): Mate
     .sort((a, b) => a.orderIndex - b.orderIndex || a.createdAt.getTime() - b.createdAt.getTime());
 }
 
+/**
+ * Карты в порядке обхода дерева: корневые по orderIndex, затем дети каждой карты.
+ * Плоская сортировка по глубине рвёт иерархию (ребёнок уезжает после чужих корней) —
+ * для селекторов нужен именно DFS-порядок.
+ */
+export function orderedMaterialsDfs(materials: Material[]): Material[] {
+  const result: Material[] = [];
+  const walk = (parentId: string | null, guard: number) => {
+    if (guard > 50) return; // защита от циклов
+    for (const m of childrenOf(materials, parentId)) {
+      result.push(m);
+      walk(m.id, guard + 1);
+    }
+  };
+  walk(null, 0);
+  // карты из цикла (не достижимы от корня) добавляем в конец, чтобы не терялись,
+  // в том же порядке, что и обычные сиблинги (orderIndex → createdAt)
+  const seen = new Set(result.map((m) => m.id));
+  const orphaned = materials
+    .filter((m) => !seen.has(m.id))
+    .sort((a, b) => a.orderIndex - b.orderIndex || a.createdAt.getTime() - b.createdAt.getTime());
+  result.push(...orphaned);
+  return result;
+}
+
 /** Путь от корневой карты до указанной (для хлебных крошек) */
 export function getPathToRoot(materials: Material[], id: string | null): Material[] {
   const byId = new Map(materials.map((m) => [m.id, m]));

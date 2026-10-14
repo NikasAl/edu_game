@@ -23,6 +23,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { db } from '@/lib/db';
+import { orderedMaterialsDfs } from '@/lib/maps';
 import { computePeriodSummary, computeStats, STATS_PERIOD_META, type DayActivity, type StatsPeriod } from '@/lib/stats';
 import { useAppStore } from '@/store/useAppStore';
 import type { Material } from '@/lib/types';
@@ -107,20 +108,19 @@ export default function StatsPanel() {
       period,
       now: new Date(),
     });
-    const sortedMaterials = [...materials].sort(
-      (a, b) =>
-        depthOf(a, new Map(materials.map((m) => [m.id, m]))) - depthOf(b, new Map(materials.map((m) => [m.id, m]))) ||
-        a.orderIndex - b.orderIndex ||
-        a.createdAt.getTime() - b.createdAt.getTime()
-    );
-    return { stats, summary, materials: sortedMaterials, title };
+    // порядок для селекта — обход дерева (родитель, затем его дети). Плоская
+    // сортировка по глубине рвала иерархию: ребёнок уезжал после чужих корней
+    const byId = new Map(materials.map((m) => [m.id, m]));
+    const ordered = orderedMaterialsDfs(materials);
+    const depths = new Map(ordered.map((m) => [m.id, depthOf(m, byId)]));
+    return { stats, summary, materials: ordered, depths, title };
   }, [bundle, scope, windowDays, difficulty, period]);
 
   if (!bundle || !view) {
     return <p className="pt-8 text-center text-sm text-muted-foreground">Загрузка…</p>;
   }
 
-  const { stats, summary, materials, title } = view;
+  const { stats, summary, materials, depths, title } = view;
   const percent =
     stats.nodesMasterable > 0 ? Math.round((stats.nodesMastered / stats.nodesMasterable) * 100) : 0;
   const scopeLabel = scope === 'all' ? 'Все карты' : title;
@@ -163,12 +163,19 @@ export default function StatsPanel() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">Все карты вместе</SelectItem>
-            {materials.map((m) => (
-              <SelectItem key={m.id} value={m.id}>
-                {'\u00A0'.repeat(depthOf(m, new Map(materials.map((x) => [x.id, x]))) * 2)}
-                {m.title}
-              </SelectItem>
-            ))}
+            {materials.map((m) => {
+              const d = depths.get(m.id) ?? 0;
+              return (
+                <SelectItem key={m.id} value={m.id}>
+                  <span className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: d * 14 }}>
+                    {d > 0 && (
+                      <span aria-hidden className="shrink-0 text-muted-foreground">↳</span>
+                    )}
+                    <span className="truncate">{m.title}</span>
+                  </span>
+                </SelectItem>
+              );
+            })}
           </SelectContent>
         </Select>
         <Select value={String(windowDays)} onValueChange={(v) => setWindowDays(Number(v) as ScopeDays)}>

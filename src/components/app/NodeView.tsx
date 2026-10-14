@@ -410,7 +410,6 @@ function FeynmanTrial({
           disabled={busy}
         />
         <AnswerHelpers
-          variant="feynman"
           onAppend={(chunk) => setText((prev) => appendChunk(prev ?? '', chunk))}
           disabled={busy || (passed && !retake)}
         />
@@ -787,7 +786,6 @@ function TaskTrial({
             />
             {(!passed || retake) && !broken && (
               <AnswerHelpers
-                variant="essay"
                 onAppend={(chunk) => setInput((prev) => appendChunk(prev ?? '', chunk))}
                 disabled={essayBusy}
               />
@@ -1076,7 +1074,6 @@ function OwnTaskTrial({
           disabled={busy}
         />
         <AnswerHelpers
-          variant="own"
           onAppend={(chunk) => setText((prev) => appendChunk(prev ?? '', chunk))}
           disabled={busy || (passed && !retake)}
         />
@@ -1348,7 +1345,6 @@ function ReviewCard({
                 />
                 {verdict === null && (
                   <AnswerHelpers
-                    variant="review"
                     onAppend={(chunk) => setInput((prev) => appendChunk(prev ?? '', chunk))}
                     disabled={busy}
                   />
