@@ -348,8 +348,8 @@ function ForecastCard({ stats, title }: { stats: ReturnType<typeof computeStats>
 
         {!f ? (
           <p className="text-sm text-muted-foreground">
-            Прогноз появится, когда будет освоен хотя бы один узел: темп считается по последним 14 дням,
-            а если в них пусто — в среднем за всё время.
+            Прогноз появится, когда будет освоен хотя бы один узел: темп считается по дням вашей работы
+            в выбранной области (окно до 14 дней), а если зачётов в окне нет — в среднем за всё время.
           </p>
         ) : f.done ? (
           <div className="flex items-center gap-3 py-1">
@@ -376,7 +376,13 @@ function ForecastCard({ stats, title }: { stats: ReturnType<typeof computeStats>
             <p className="text-xs text-muted-foreground">
               Осталось {f.remaining} из {stats.nodesMasterable} узл(ов) · темп ~
               {formatPace(f.pacePerDay)} узла/день{' '}
-              ({f.paceSource === 'recent' ? 'последние 14 дней' : 'в среднем за всё время'})
+              (
+              {f.paceSource === 'recent'
+                ? f.paceWindowDays >= 14
+                  ? 'последние 14 дней'
+                  : `за ${f.paceWindowDays} ${pluralDays(f.paceWindowDays)} с начала работы`
+                : 'в среднем за всё время'}
+              )
             </p>
             <p className="text-[11px] text-muted-foreground">
               Оценка по текущему темпу освоения узлов; при изменении ритма прогноз пересчитается сам.

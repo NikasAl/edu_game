@@ -242,6 +242,9 @@ export interface TaskInstance {
   taskId: string;
   values: Record<string, number>;
   renderedPrompt: string;
+  /** Подсказки и разбор с подставленными параметрами/выражениями ({{n}}, {{n - 1}}) */
+  renderedHints: string[];
+  renderedExplanation: string;
   answer: number | string; // для numeric — число, иначе — эталон
   answerError?: string; // numeric: непусто, если формула ответа не вычисляется (задача «сломана»)
 }

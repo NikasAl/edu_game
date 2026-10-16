@@ -52,21 +52,51 @@ function codeAnswerEquals(userInput: string, refs: string[]): boolean {
 }
 
 /**
- * Создать экземпляр задачи: подставить параметры в промпт и вычислить ответ.
- * Для задач без параметров возвращает промпт как есть.
+ * Форматирование числа в подстановке шаблонов: целое — как есть,
+ * дробное — до 2 знаков с запятой (как в остальном интерфейсе).
+ */
+function formatNum(n: number): string {
+  if (!Number.isFinite(n)) return '—';
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100).replace('.', ',');
+}
+
+/**
+ * Подставить параметры и выражения над ними в текст с шаблонами {{...}}.
+ * Понимаются имена параметров ({{n}}) и арифметические выражения над ними
+ * ({{n - 1}}, {{round(minutes * ratio / 100)}}) — тем же вычислителем, что и
+ * answerSpec.expr. Нераспознанное (неизвестный параметр, обычный текст,
+ * битое выражение) остаётся как есть: шаблоны приходят из LLM/БД,
+ * рендер не должен падать.
+ */
+export function substituteTemplates(text: string, values: Record<string, number>): string {
+  if (!text) return text ?? '';
+  return text.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (whole, raw: string) => {
+    const name = raw.trim();
+    // простое имя параметра — подставить значение ({{unknown}} остаётся как есть)
+    if (/^[a-zA-Z_][a-zA-Z_0-9]*$/.test(name)) {
+      if (name in values) return formatNum(values[name]);
+      return whole;
+    }
+    // выражение над параметрами — вычислить безопасно; ошибка → оставить как есть
+    const r = safeEvalExpr(name, values);
+    return r.ok ? formatNum(r.value) : whole;
+  });
+}
+
+/**
+ * Создать экземпляр задачи: подставить параметры в промпт, подсказки и разбор.
+ * Для задач без параметров возвращает тексты как есть (кроме тримминга пустых).
  */
 export function instantiateTask(task: Task): TaskInstance {
   const values: Record<string, number> = {};
   for (const p of task.params ?? []) {
     values[p.name] = pick(p.choices);
   }
-  const renderedPrompt = task.prompt.replace(/\{\{\s*([a-zA-Z_][a-zA-Z_0-9]*)\s*\}\}/g, (_, name: string) => {
-    if (name in values) {
-      const v = values[name];
-      return Number.isInteger(v) ? String(v) : String(v).replace('.', ',');
-    }
-    return `{{${name}}}`;
-  });
+  const renderedPrompt = substituteTemplates(task.prompt, values);
+  const renderedHints = (task.hints ?? [])
+    .filter((h) => String(h ?? '').trim())
+    .map((h) => substituteTemplates(h, values));
+  const renderedExplanation = task.explanation ? substituteTemplates(task.explanation, values) : '';
 
   const spec = task.answerSpec;
   let answer: number | string = '';
@@ -91,7 +121,9 @@ export function instantiateTask(task: Task): TaskInstance {
     // essay: локального эталона нет — проверка LLM/локальной рубрикой в NodeView
     answer = '';
   }
-  return answerError ? { taskId: task.id, values, renderedPrompt, answer, answerError } : { taskId: task.id, values, renderedPrompt, answer };
+  return answerError
+    ? { taskId: task.id, values, renderedPrompt, renderedHints, renderedExplanation, answer, answerError }
+    : { taskId: task.id, values, renderedPrompt, renderedHints, renderedExplanation, answer };
 }
 
 /**
@@ -148,11 +180,6 @@ export function checkAnswer(instance: TaskInstance, spec: AnswerSpec, userInput:
     verdict: ok ? 'pass' : 'fail',
     correctAnswer: ok ? undefined : spec.options[Number(instance.answer)],
   };
-}
-
-function formatNum(n: number): string {
-  if (!Number.isFinite(n)) return '—';
-  return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100).replace('.', ',');
 }
 
 /**

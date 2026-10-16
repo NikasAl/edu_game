@@ -46,7 +46,7 @@ import {
 } from '@/lib/llm-ops';
 import { essayDuplicatesFeynman } from '@/lib/text-sim';
 import { evalExpr } from '@/lib/safeMath';
-import { instantiateTask, taskProblems } from '@/lib/task-engine';
+import { instantiateTask, substituteTemplates, taskProblems } from '@/lib/task-engine';
 import type {
   AnswerSpec,
   Attempt,
@@ -549,9 +549,9 @@ function validateExprSamples(params: TaskParam[], expr: string): string | null {
 function makeSampleInstance(t: Task): TaskInstance {
   const values: Record<string, number> = {};
   for (const p of t.params ?? []) values[p.name] = p.choices[0];
-  const renderedPrompt = t.prompt.replace(/\{\{\s*([a-zA-Z_][a-zA-Z_0-9]*)\s*\}\}/g, (_, name: string) =>
-    name in values ? String(values[name]) : `{{${name}}}`
-  );
+  const renderedPrompt = substituteTemplates(t.prompt, values);
+  const renderedHints = (t.hints ?? []).filter((h) => String(h ?? '').trim()).map((h) => substituteTemplates(h, values));
+  const renderedExplanation = t.explanation ? substituteTemplates(t.explanation, values) : '';
   const spec = t.answerSpec;
   let answer: number | string = '';
   if (spec.kind === 'numeric') answer = evalExpr(spec.expr, values);
@@ -559,7 +559,7 @@ function makeSampleInstance(t: Task): TaskInstance {
   else if (spec.kind === 'choice') answer = String(spec.correctIndex);
   else if (spec.kind === 'code') answer = spec.value;
   else answer = spec.expectation.join('; ');
-  return { taskId: t.id, values, renderedPrompt, answer };
+  return { taskId: t.id, values, renderedPrompt, renderedHints, renderedExplanation, answer };
 }
 
 const NO_REPORT: CheckReport | null = null;

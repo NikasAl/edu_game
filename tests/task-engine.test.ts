@@ -95,7 +95,7 @@ describe('checkAnswer — numeric', () => {
   const spec = { kind: 'numeric' as const, expr: 'a*2', tolerance: 0.01 };
 
   function instanceOf(answer: number, error?: string) {
-    return { taskId: 't', values: { a: 1 }, renderedPrompt: '?', answer, answerError: error };
+    return { taskId: 't', values: { a: 1 }, renderedPrompt: '?', renderedHints: [], renderedExplanation: '', answer, answerError: error };
   }
 
   it('верный ответ с допуском', () => {
@@ -126,19 +126,19 @@ describe('checkAnswer — exact', () => {
   const spec = { kind: 'exact' as const, value: 'Ель', alts: ['ель обыкновенная'] };
 
   it('регистр и падежные мелочи прощаются', () => {
-    expect(checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', answer: 'ель' }, spec, 'ЕЛЬ').verdict).toBe(
+    expect(checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', renderedHints: [], renderedExplanation: '', answer: 'ель' }, spec, 'ЕЛЬ').verdict).toBe(
       'pass'
     );
   });
 
   it('альтернативные эталоны засчитываются', () => {
     expect(
-      checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', answer: 'ель' }, spec, 'Ель обыкновенная').verdict
+      checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', renderedHints: [], renderedExplanation: '', answer: 'ель' }, spec, 'Ель обыкновенная').verdict
     ).toBe('pass');
   });
 
   it('неверный — показывает эталон', () => {
-    const r = checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', answer: 'ель' }, spec, 'сосна');
+    const r = checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', renderedHints: [], renderedExplanation: '', answer: 'ель' }, spec, 'сосна');
     expect(r.verdict).toBe('fail');
     expect(r.correctAnswer).toBe('Ель');
   });
@@ -147,7 +147,7 @@ describe('checkAnswer — exact', () => {
 describe('checkAnswer — code_output / code_fill', () => {
   const spec = { kind: 'code' as const, value: '1\n2\n3' };
 
-  const inst = { taskId: 't', values: {}, renderedPrompt: '?', answer: '1\n2\n3' };
+  const inst = { taskId: 't', values: {}, renderedPrompt: '?', renderedHints: [], renderedExplanation: '', answer: '1\n2\n3' };
 
   it('точное совпадение', () => {
     expect(checkAnswer(inst, spec, '1\n2\n3').verdict).toBe('pass');
@@ -174,7 +174,7 @@ describe('checkAnswer — code_output / code_fill', () => {
 
 describe('checkAnswer — choice', () => {
   const spec = { kind: 'choice' as const, options: ['Вода', 'Лёд', 'Пар'], correctIndex: 2 };
-  const inst = { taskId: 't', values: {}, renderedPrompt: '?', answer: '2' };
+  const inst = { taskId: 't', values: {}, renderedPrompt: '?', renderedHints: [], renderedExplanation: '', answer: '2' };
 
   it('верный индекс', () => {
     expect(checkAnswer(inst, spec, '2').verdict).toBe('pass');
@@ -190,7 +190,7 @@ describe('checkAnswer — choice', () => {
 describe('checkAnswer — essay (заглушка, проверка в NodeView)', () => {
   it('всегда fail без correctAnswer', () => {
     const spec = { kind: 'essay' as const, expectation: ['п1', 'п2'] };
-    const r = checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', answer: '' }, spec, 'текст');
+    const r = checkAnswer({ taskId: 't', values: {}, renderedPrompt: '?', renderedHints: [], renderedExplanation: '', answer: '' }, spec, 'текст');
     expect(r.verdict).toBe('fail');
     expect(r.correctAnswer).toBeUndefined();
   });
@@ -303,5 +303,87 @@ describe('shuffledOrder — перемешивание показа вариан
     expect(shuffledOrder(0)).toEqual([]);
     expect(shuffledOrder(-3)).toEqual([]);
     expect(shuffledOrder(1)).toEqual([0]);
+  });
+});
+
+// ============ Подстановка шаблонов в подсказки и разбор ============
+
+describe('substituteTemplates / instantiateTask — шаблоны в hints и explanation', () => {
+  it('имена параметров подставляются в подсказки и разбор', () => {
+    const task = mkTask({
+      prompt: 'Группа из {{n}} человек.',
+      hints: ['Всего {{n}} студентов.', ''],
+      explanation: 'Копируют всех, кроме одного.',
+      params: [{ name: 'n', choices: [25] }],
+      answerSpec: { kind: 'numeric', expr: 'n - 1' },
+    });
+    const inst = instantiateTask(task);
+    expect(inst.renderedHints).toEqual(['Всего 25 студентов.']);
+    expect(inst.renderedExplanation).toBe('Копируют всех, кроме одного.');
+  });
+
+  it('выражения над параметрами вычисляются: {{n - 1}} → 24', () => {
+    const task = mkTask({
+      prompt: 'В группе {{n}} студентов.',
+      explanation: 'то копируют ${{n}} - 1 = {{n - 1}}$ студентов',
+      params: [{ name: 'n', choices: [25] }],
+      answerSpec: { kind: 'numeric', expr: 'n - 1' },
+    });
+    const inst = instantiateTask(task);
+    expect(inst.renderedPrompt).toContain('группе 25 студентов');
+    expect(inst.renderedExplanation).toContain('$25 - 1 = 24$');
+  });
+
+  it('функции вычислителя работают в шаблонах: round(minutes * ratio / 100)', () => {
+    const task = mkTask({
+      prompt: 'Тема изучалась {{minutes}} минут.',
+      hints: ['Минимум {{round(minutes * ratio / 100)}} минут.'],
+      explanation: '$$\\frac{{{minutes}} \\cdot {{ratio}}}{100} = {{minutes * ratio / 100}}$$',
+      params: [
+        { name: 'minutes', choices: [60] },
+        { name: 'ratio', choices: [40] },
+      ],
+      answerSpec: { kind: 'numeric', expr: 'round(minutes * ratio / 100)' },
+    });
+    const inst = instantiateTask(task);
+    expect(inst.renderedHints).toEqual(['Минимум 24 минут.']);
+    // {{minutes}} внутри LaTeX-скобок \frac{...} подставляется, скобки остаются
+    expect(inst.renderedExplanation).toBe('$$\\frac{60 \\cdot 40}{100} = 24$$');
+  });
+
+  it('битое выражение и неизвестный параметр остаются как есть (рендер не падает)', () => {
+    const task = mkTask({
+      prompt: 'Вопрос {{n}} {{foo}} {{n +}}?',
+      explanation: 'Разбор {{n / 0 см}} и {{foo - 1}}',
+      params: [{ name: 'n', choices: [5] }],
+      answerSpec: { kind: 'numeric', expr: 'n' },
+    });
+    const inst = instantiateTask(task);
+    expect(inst.renderedPrompt).toContain('Вопрос 5 {{foo}} {{n +}}?');
+    expect(inst.renderedExplanation).toContain('Разбор {{n / 0 см}} и {{foo - 1}}');
+  });
+
+  it('дробный результат выражения форматируется с запятой', () => {
+    const task = mkTask({
+      prompt: 'q',
+      explanation: 'Получили {{n / 4}}',
+      params: [{ name: 'n', choices: [3] }],
+      answerSpec: { kind: 'numeric', expr: 'n' },
+    });
+    expect(instantiateTask(task).renderedExplanation).toBe('Получили 0,75');
+  });
+
+  it('пустые подсказки выбрасываются, промпт без шаблонов не трогается', () => {
+    const task = mkTask({
+      prompt: 'Простой вопрос?',
+      hints: ['', '   '],
+      explanation: '',
+      params: [{ name: 'n', choices: [1] }],
+      answerSpec: { kind: 'numeric', expr: 'n' },
+    });
+    const inst = instantiateTask(task);
+    expect(inst.renderedHints).toEqual([]);
+    expect(inst.renderedExplanation).toBe('');
+    expect(inst.renderedPrompt).toBe('Простой вопрос?');
   });
 });

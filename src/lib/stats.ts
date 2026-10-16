@@ -29,7 +29,9 @@ export interface DayActivity {
 export interface Forecast {
   remaining: number; // сколько осваиваемых узлов осталось
   pacePerDay: number; // текущий темп, узлов/день
-  paceSource: 'recent' | 'alltime'; // окно 14 дней или среднее за всё время
+  paceSource: 'recent' | 'alltime'; // окно с начала работы (≤14 дней) или среднее за всё время
+  /** Сколько дней вошло в окно темпа (1..14): от первой попытки в области */
+  paceWindowDays: number;
   etaDays: number | null; // null — темпа нет (done или нет данных)
   etaDate: Date | null;
   done: boolean; // осваиваемые узлы закрыты
@@ -341,16 +343,28 @@ export function computeStats(
   }
 
   // --- прогноз освоения ---
+  // Темп считается по окну ДО 14 дней, но окно не «вылезает» раньше начала
+  // работы с областью: если первая попытка была сегодня, делить на 14 нельзя —
+  // иначе темп занижается (4 узла за день показывались как 0,3/день и 56 дней
+  // до конца). Якорь окна — первая попытка в скоупе (любой вердикт): карта,
+  // начатая сегодня, даёт окно 1 день и честный темп «столько-то узлов за день».
+  const RECENT_WINDOW = 14;
   const remaining = Math.max(0, nodesMasterable - nodesMastered);
   let forecast: Forecast | null = null;
   if (nodesMasterable > 0) {
     if (remaining === 0) {
-      forecast = { remaining: 0, pacePerDay: 0, paceSource: 'recent', etaDays: null, etaDate: null, done: true };
+      forecast = { remaining: 0, pacePerDay: 0, paceSource: 'recent', paceWindowDays: 0, etaDays: null, etaDate: null, done: true };
     } else {
-      const recentStart = addDays(todayStart, -13); // окно 14 дней
+      let paceWindowDays = RECENT_WINDOW;
+      if (firstAttemptAt) {
+        const firstDay = startOfDay(firstAttemptAt);
+        const workedDays = Math.round((todayStart.getTime() - firstDay.getTime()) / 86_400_000) + 1;
+        paceWindowDays = Math.min(RECENT_WINDOW, Math.max(1, workedDays));
+      }
+      const windowStart = addDays(todayStart, -(paceWindowDays - 1));
       let masteredInWindow = 0;
-      for (const d of masteredAt.values()) if (d >= recentStart) masteredInWindow++;
-      let pace = masteredInWindow / 14;
+      for (const d of masteredAt.values()) if (d >= windowStart) masteredInWindow++;
+      let pace = masteredInWindow / paceWindowDays;
       let source: 'recent' | 'alltime' = 'recent';
       if (pace <= 0 && nodesMastered > 0 && firstAttemptAt) {
         const daysSpan = Math.max(1, Math.round((todayStart.getTime() - startOfDay(firstAttemptAt).getTime()) / 86_400_000) + 1);
@@ -363,6 +377,7 @@ export function computeStats(
           remaining,
           pacePerDay: pace,
           paceSource: source,
+          paceWindowDays,
           etaDays,
           etaDate: addDays(todayStart, etaDays),
           done: false,

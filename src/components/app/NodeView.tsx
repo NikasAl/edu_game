@@ -600,13 +600,18 @@ function TaskTrial({
     return { verdict: attempt.verdict === 'pass' ? 'pass' : 'fail', score: attempt.score ?? 0, missed, feedback: attempt.feedback };
   }, [isEssay, attempt]);
   const hints = useMemo(() => {
-    const arr = [task.hints[0] ?? '', task.hints[1] ?? '', task.explanation].filter(Boolean);
+    // подсказки и разбор — с подставленными параметрами/выражениями ({{n - 1}} → 24)
+    const arr = [
+      instance?.renderedHints[0] ?? '',
+      instance?.renderedHints[1] ?? '',
+      instance?.renderedExplanation ?? '',
+    ].filter(Boolean);
     // подсказки, догенерированные LLM, добавляются в конец (уровни после локальных)
     for (let lvl = arr.length + 1; lvl <= 3; lvl++) {
       if (llmHints[lvl]) arr.push(llmHints[lvl]);
     }
     return arr;
-  }, [task, llmHints]);
+  }, [instance, llmHints]);
   const passed = attempt?.verdict === 'pass' && verdict === 'pass';
   const choiceSpec = task.answerSpec.kind === 'choice' ? task.answerSpec : null;
   // Перемешанный порядок ПОКАЗА вариантов: правильный ответ не всегда первым

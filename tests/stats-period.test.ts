@@ -258,3 +258,75 @@ describe('exploratory-попытки не меняют состояние узл
     expect(stats.attemptsPass).toBe(3);
   });
 });
+
+// ============ Прогноз освоения: окно темпа от начала работы ============
+
+describe('computeStats — прогноз: окно не вылезает раньше первой попытки', () => {
+  it('карта начата сегодня, 4 узла освоено → темп 4/день, а не 4/14', () => {
+    const now = new Date('2026-10-16T15:00:00');
+    const nodes = Array.from({ length: 20 }, (_, i) => mkNode({ id: `n${i}`, orderIndex: i }));
+    const tasks = nodes.map((n) => mkTask(n.id, `t-${n.id}`));
+    // 4 узла закрыты сегодня (фейнман + задача)
+    const attempts: Attempt[] = [];
+    for (let i = 0; i < 4; i++) {
+      attempts.push(mkAttempt(`n${i}`, 'feynman', 'pass', new Date('2026-10-16T10:00:00')));
+      attempts.push(mkAttempt(`n${i}`, 'task', 'pass', new Date('2026-10-16T11:00:00'), { taskId: `t-n${i}` }));
+    }
+    const { forecast } = computeStats({ nodes, edges: [], tasks, attempts }, 28, now, 'normal');
+    expect(forecast).not.toBeNull();
+    expect(forecast!.done).toBe(false);
+    expect(forecast!.paceWindowDays).toBe(1);
+    expect(forecast!.paceSource).toBe('recent');
+    expect(forecast!.pacePerDay).toBeCloseTo(4, 5);
+    expect(forecast!.remaining).toBe(16);
+    expect(forecast!.etaDays).toBe(4); // ceil(16 / 4), а не 56
+  });
+
+  it('работа 3 дня, 4 узла → окно 3 дня, темп 4/3', () => {
+    const now = new Date('2026-10-16T15:00:00');
+    const nodes = Array.from({ length: 20 }, (_, i) => mkNode({ id: `n${i}`, orderIndex: i }));
+    const tasks = nodes.map((n) => mkTask(n.id, `t-${n.id}`));
+    const attempts: Attempt[] = [];
+    const days = ['2026-10-14', '2026-10-15', '2026-10-16'];
+    for (let i = 0; i < 4; i++) {
+      const day = days[i % 3];
+      attempts.push(mkAttempt(`n${i}`, 'feynman', 'pass', new Date(`${day}T10:00:00`)));
+      attempts.push(mkAttempt(`n${i}`, 'task', 'pass', new Date(`${day}T11:00:00`), { taskId: `t-n${i}` }));
+    }
+    const { forecast } = computeStats({ nodes, edges: [], tasks, attempts }, 28, now, 'normal');
+    expect(forecast!.paceWindowDays).toBe(3);
+    expect(forecast!.pacePerDay).toBeCloseTo(4 / 3, 5);
+    expect(forecast!.etaDays).toBe(12); // ceil(16 / (4/3))
+  });
+
+  it('старая карта (первая попытка 30 дней назад) → окно 14 дней, как раньше', () => {
+    const now = new Date('2026-10-16T15:00:00');
+    const nodes = Array.from({ length: 10 }, (_, i) => mkNode({ id: `n${i}`, orderIndex: i }));
+    const tasks = nodes.map((n) => mkTask(n.id, `t-${n.id}`));
+    const attempts: Attempt[] = [];
+    for (let i = 0; i < 7; i++) {
+      // первая попытка — 30 дней назад, зачёты задач — 6 дней назад (внутри окна)
+      attempts.push(mkAttempt(`n${i}`, 'feynman', 'pass', new Date('2026-09-16T10:00:00')));
+      attempts.push(mkAttempt(`n${i}`, 'task', 'pass', new Date('2026-10-10T11:00:00'), { taskId: `t-n${i}` }));
+    }
+    const { forecast } = computeStats({ nodes, edges: [], tasks, attempts }, 28, now, 'normal');
+    expect(forecast!.paceWindowDays).toBe(14);
+    expect(forecast!.pacePerDay).toBeCloseTo(7 / 14, 5);
+    expect(forecast!.etaDays).toBe(6); // ceil(3 / 0.5)
+  });
+
+  it('зачёты вне окна (давно, окно 14 дней пусто) → средний темп за всё время', () => {
+    const now = new Date('2026-10-16T15:00:00');
+    const nodes = Array.from({ length: 10 }, (_, i) => mkNode({ id: `n${i}`, orderIndex: i }));
+    const tasks = nodes.map((n) => mkTask(n.id, `t-${n.id}`));
+    const attempts: Attempt[] = [];
+    for (let i = 0; i < 2; i++) {
+      attempts.push(mkAttempt(`n${i}`, 'feynman', 'pass', new Date('2026-09-20T10:00:00')));
+      attempts.push(mkAttempt(`n${i}`, 'task', 'pass', new Date('2026-09-20T11:00:00'), { taskId: `t-n${i}` }));
+    }
+    const { forecast } = computeStats({ nodes, edges: [], tasks, attempts }, 28, now, 'normal');
+    expect(forecast!.paceSource).toBe('alltime');
+    // 26 дней с первой попытки (20.09..16.10 включительно), 2 узла
+    expect(forecast!.pacePerDay).toBeCloseTo(2 / 27, 5);
+  });
+});
